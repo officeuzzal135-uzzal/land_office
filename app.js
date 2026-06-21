@@ -21,7 +21,10 @@ let DB = {
   archive: {        // archived items grouped by type
     haat: [], vp: [], chithi: [], kaj: [], paid: [], mutation: []
   },
-  deleted: { haat: {}, vp: {}, chithi: {}, kaj: {}, paid: {}, mutation: {} }, // tombstone — স্থায়ীভাবে মোছা আইটেম যাতে sync এ আবার ফিরে না আসে
+  // 'deleted' = active list থেকে সরানো (archive এ থাকে এটার ভিত্তিতে) — sync এ active list এ আবার ফিরে না আসে
+  deleted: { haat: {}, vp: {}, chithi: {}, kaj: {}, paid: {}, mutation: {} },
+  // 'purged' = স্থায়ীভাবে সব জায়গা থেকে মুছে ফেলা (active + archive দুই জায়গা থেকেই) — শুধু permanent delete এর জন্য
+  purged: { haat: {}, vp: {}, chithi: {}, kaj: {}, paid: {}, mutation: {} },
   settings: { tgToken: '', tgChatId: '', fbConfig: null }
 };
 
@@ -34,6 +37,7 @@ function loadDB() {
         ...DB, ...parsed,
         archive: { ...DB.archive, ...(parsed.archive || {}) },
         deleted: { ...DB.deleted, ...(parsed.deleted || {}) },
+        purged: { ...DB.purged, ...(parsed.purged || {}) },
         settings: { ...DB.settings, ...(parsed.settings || {}) }
       };
       purgeDeletedEverywhere(); // লোকাল ডেটাতেও tombstone থাকা সত্ত্বেও কোনো item থেকে গেলে পরিষ্কার করে নেওয়া
@@ -60,10 +64,16 @@ function saveLocalOnly() {
   } catch (e) { console.warn('সংরক্ষণ করতে সমস্যা হয়েছে:', e); }
 }
 
-// ডিলিট হওয়া আইটেমকে tombstone এ চিহ্নিত করে — sync এ আবার ফিরে আসবে না
+// আর্কাইভ করার সময় ব্যবহার হয় — শুধু active list (DB.haat ইত্যাদি) থেকে বাদ থাকবে, কিন্তু archive এ থেকে যাবে
 function markDeleted(type, id) {
   DB.deleted[type] = DB.deleted[type] || {};
   DB.deleted[type][id] = Date.now();
+}
+
+// স্থায়ী মুছে ফেলার সময় ব্যবহার হয় — active list এবং archive দুই জায়গা থেকেই একদম চিরতরে বাদ যাবে
+function markPurged(type, id) {
+  DB.purged[type] = DB.purged[type] || {};
+  DB.purged[type][id] = Date.now();
 }
 
 // tombstone-যুক্ত কাজ (archive/permanent-delete) এর পর দেরি না করে সাথে সাথে Firebase এ push করে —
@@ -1010,7 +1020,7 @@ function restoreArchive(type, id) {
 function permanentDeleteArchive(type, id) {
   if (!confirm('এটি স্থায়ীভাবে মুছে যাবে। আপনি কি নিশ্চিত?')) return;
   DB.archive[type] = DB.archive[type].filter(i => i.id != id);
-  markDeleted(type, id); // স্থায়ী মুছে ফেলা — tombstone থেকে যাবে যাতে sync এ remote থেকে আবার না আসে
+  markPurged(type, id); // স্থায়ী মুছে ফেলা — purged tombstone, যাতে sync এ active list ও archive কোথাও আবার না আসে
   saveDB(); renderAll(); pushNow();
   showToast('🗑️ স্থায়ীভাবে মুছে ফেলা হয়েছে');
 }
@@ -1211,15 +1221,27 @@ function mergeById(localArr, remoteArr, deletedMap) {
 function purgeDeletedEverywhere() {
   for (const type of SYNC_TYPES) {
     const dmap = DB.deleted[type] || {};
-    const ids = Object.keys(dmap);
-    if (!ids.length) continue;
-    const idSet = new Set(ids.map(String));
-    DB[type] = (DB[type] || []).filter(i => !idSet.has(String(i.id)));
-    DB.archive[type] = (DB.archive[type] || []).filter(i => !idSet.has(String(i.id)));
+    const pmap = DB.purged[type] || {};
+    const deletedIds = new Set(Object.keys(dmap).map(String));
+    const purgedIds = new Set(Object.keys(pmap).map(String));
+
+    // active list থেকে বাদ: হয় আর্কাইভ করা হয়েছে (deleted), নয়তো স্থায়ীভাবে মুছে ফেলা হয়েছে (purged)
+    if (deletedIds.size || purgedIds.size) {
+      DB[type] = (DB[type] || []).filter(i => !deletedIds.has(String(i.id)) && !purgedIds.has(String(i.id)));
+    }
+    // archive থেকে বাদ: শুধুমাত্র স্থায়ীভাবে মুছে ফেলা হলে (purged) — আর্কাইভ করা item এখানেই থাকার কথা
+    if (purgedIds.size) {
+      DB.archive[type] = (DB.archive[type] || []).filter(i => !purgedIds.has(String(i.id)));
+    }
   }
 }
 
 const SYNC_TYPES = ['haat', 'vp', 'chithi', 'kaj', 'paid', 'mutation'];
+
+// active list এর জন্য — deleted (archived) এবং purged (স্থায়ী মুছে ফেলা) দুটো মিলিয়ে একটা combined tombstone map দেয়
+function combinedTombstone(type) {
+  return { ...(DB.deleted[type] || {}), ...(DB.purged[type] || {}) };
+}
 
 async function pushToFirebase() {
   if (!fbDb) return;
@@ -1234,14 +1256,19 @@ async function pushToFirebase() {
             DB.deleted[type] = { ...(remote.deleted[type] || {}), ...(DB.deleted[type] || {}) };
           }
         }
+        if (remote.purged) {
+          for (const type of Object.keys(DB.purged)) {
+            DB.purged[type] = { ...(remote.purged[type] || {}), ...(DB.purged[type] || {}) };
+          }
+        }
         for (const type of SYNC_TYPES) {
-          DB[type] = mergeById(DB[type], remote[type], DB.deleted[type]);
+          DB[type] = mergeById(DB[type], remote[type], combinedTombstone(type));
         }
         if (remote.notes) DB.notes = mergeById(DB.notes, remote.notes, {});
         if (remote.diary) DB.diary = mergeById(DB.diary, remote.diary, {});
         if (remote.archive) {
           for (const type of SYNC_TYPES) {
-            DB.archive[type] = mergeById(DB.archive[type], (remote.archive || {})[type], DB.deleted[type]);
+            DB.archive[type] = mergeById(DB.archive[type], (remote.archive || {})[type], DB.purged[type]);
           }
         }
         purgeDeletedEverywhere(); // চূড়ান্ত নিরাপত্তা — tombstone এর কোনো item যেন কোথাও না থাকে
@@ -1255,6 +1282,7 @@ async function pushToFirebase() {
       notes: DB.notes, diary: DB.diary,
       archive: DB.archive,
       deleted: DB.deleted,
+      purged: DB.purged,
       updatedAt: stamp
     };
     window._lastPushStamp = stamp; // এই push নিজে যা পাঠাচ্ছে, সেটা listener এ ফিরে এলে যেন আবার "নতুন" মনে না করে
@@ -1277,14 +1305,19 @@ async function pullFromFirebase() {
           DB.deleted[type] = { ...(d.deleted[type] || {}), ...(DB.deleted[type] || {}) };
         }
       }
+      if (d.purged) {
+        for (const type of Object.keys(DB.purged)) {
+          DB.purged[type] = { ...(d.purged[type] || {}), ...(DB.purged[type] || {}) };
+        }
+      }
       for (const type of SYNC_TYPES) {
-        if (d[type]) DB[type] = mergeById(DB[type], d[type], DB.deleted[type]);
+        if (d[type]) DB[type] = mergeById(DB[type], d[type], combinedTombstone(type));
       }
       if (d.notes) DB.notes = mergeById(DB.notes, d.notes, {});
       if (d.diary) DB.diary = mergeById(DB.diary, d.diary, {});
       if (d.archive) {
         for (const type of SYNC_TYPES) {
-          DB.archive[type] = mergeById(DB.archive[type], (d.archive || {})[type], DB.deleted[type]);
+          DB.archive[type] = mergeById(DB.archive[type], (d.archive || {})[type], DB.purged[type]);
         }
       }
       purgeDeletedEverywhere(); // চূড়ান্ত নিরাপত্তা — tombstone এর কোনো item যেন কোথাও না থাকে
@@ -1321,14 +1354,19 @@ function startFirebaseSync() {
         DB.deleted[type] = { ...(d.deleted[type] || {}), ...(DB.deleted[type] || {}) };
       }
     }
+    if (d.purged) {
+      for (const type of Object.keys(DB.purged)) {
+        DB.purged[type] = { ...(d.purged[type] || {}), ...(DB.purged[type] || {}) };
+      }
+    }
     for (const type of SYNC_TYPES) {
-      if (d[type]) DB[type] = mergeById(DB[type], d[type], DB.deleted[type]);
+      if (d[type]) DB[type] = mergeById(DB[type], d[type], combinedTombstone(type));
     }
     if (d.notes) DB.notes = mergeById(DB.notes, d.notes, {});
     if (d.diary) DB.diary = mergeById(DB.diary, d.diary, {});
     if (d.archive) {
       for (const type of SYNC_TYPES) {
-        DB.archive[type] = mergeById(DB.archive[type], (d.archive || {})[type], DB.deleted[type]);
+        DB.archive[type] = mergeById(DB.archive[type], (d.archive || {})[type], DB.purged[type]);
       }
     }
     purgeDeletedEverywhere(); // চূড়ান্ত নিরাপত্তা — tombstone এর কোনো item যেন কোথাও না থাকে
