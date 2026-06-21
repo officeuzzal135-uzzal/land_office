@@ -49,6 +49,14 @@ function saveDB() {
   }
 }
 
+// শুধু localStorage এ সংরক্ষণ করে — Firebase push ট্রিগার করে না।
+// remote থেকে ডেটা আসার পর (pull/listener) এটা ব্যবহার করা হয়, যাতে নিজের শোনা ডেটা আবার নিজেই push না করে ফেলে (loop আটকাতে)
+function saveLocalOnly() {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(DB));
+  } catch (e) { console.warn('সংরক্ষণ করতে সমস্যা হয়েছে:', e); }
+}
+
 // ডিলিট হওয়া আইটেমকে tombstone এ চিহ্নিত করে — sync এ আবার ফিরে আসবে না
 function markDeleted(type, id) {
   DB.deleted[type] = DB.deleted[type] || {};
@@ -1159,16 +1167,18 @@ async function pushToFirebase() {
       }
     } catch (e) { /* remote read ব্যর্থ হলেও local দিয়ে এগিয়ে যাই */ }
 
+    const stamp = Date.now();
     const payload = {
       haat: DB.haat, vp: DB.vp, chithi: DB.chithi, kaj: DB.kaj,
       paid: DB.paid, mutation: DB.mutation,
       notes: DB.notes, diary: DB.diary,
       archive: DB.archive,
       deleted: DB.deleted,
-      updatedAt: Date.now()
+      updatedAt: stamp
     };
+    window._lastPushStamp = stamp; // এই push নিজে যা পাঠাচ্ছে, সেটা listener এ ফিরে এলে যেন আবার "নতুন" মনে না করে
     await window._fbSet(window._fbRef(fbDb, FB_PATH), payload);
-    saveDB(); renderAll();
+    saveLocalOnly(); renderAll();
   } catch (e) {
     setSyncStatus(false, 'Sync ব্যর্থ');
     showToast('Firebase sync ব্যর্থ: ' + e.message, 'error');
@@ -1196,7 +1206,7 @@ async function pullFromFirebase() {
           DB.archive[type] = mergeById(DB.archive[type], (d.archive || {})[type], {});
         }
       }
-      saveDB(); renderAll();
+      saveLocalOnly(); renderAll();
       setSyncStatus(true, 'Synced ✓');
     }
   } catch (e) { console.warn('Firebase pull error:', e); }
@@ -1208,26 +1218,36 @@ function startFirebaseSync() {
   window._fbOnValue(window._fbRef(fbDb, FB_PATH), (snap) => {
     if (!snap.exists()) return;
     const d = snap.val();
-    if (d.updatedAt && d.updatedAt > (window._lastLocalUpdate || 0)) {
-      if (d.deleted) {
-        for (const type of Object.keys(DB.deleted)) {
-          DB.deleted[type] = { ...(d.deleted[type] || {}), ...(DB.deleted[type] || {}) };
-        }
+    if (!d.updatedAt) return;
+
+    // এই update টা নিজের পাঠানো push এর প্রতিধ্বনি কিনা চেক করি — হলে কিছুই করার দরকার নেই
+    if (d.updatedAt === window._lastPushStamp) return;
+
+    // ইতিমধ্যে দেখা/প্রসেস করা updatedAt হলে আবার প্রসেস করব না (Firebase মাঝে মাঝে একই ডেটা একাধিকবার পাঠাতে পারে)
+    if (d.updatedAt === window._lastSeenRemoteStamp) return;
+    window._lastSeenRemoteStamp = d.updatedAt;
+
+    // নিজের সাম্প্রতিক local পরিবর্তনের চেয়ে পুরোনো হলে — এটা আমাদেরই পাঠানো ডেটা ফিরে এসেছে, স্কিপ করি
+    if (d.updatedAt <= (window._lastLocalUpdate || 0)) return;
+
+    if (d.deleted) {
+      for (const type of Object.keys(DB.deleted)) {
+        DB.deleted[type] = { ...(d.deleted[type] || {}), ...(DB.deleted[type] || {}) };
       }
-      for (const type of SYNC_TYPES) {
-        if (d[type]) DB[type] = mergeById(DB[type], d[type], DB.deleted[type]);
-      }
-      if (d.notes) DB.notes = mergeById(DB.notes, d.notes, {});
-      if (d.diary) DB.diary = mergeById(DB.diary, d.diary, {});
-      if (d.archive) {
-        for (const type of SYNC_TYPES) {
-          DB.archive[type] = mergeById(DB.archive[type], (d.archive || {})[type], {});
-        }
-      }
-      saveDB(); renderAll();
-      setSyncStatus(true, 'Real-time ✓');
-      showToast('🔔 নতুন আপডেট এসেছে (Telegram/অন্য ডিভাইস থেকে)');
     }
+    for (const type of SYNC_TYPES) {
+      if (d[type]) DB[type] = mergeById(DB[type], d[type], DB.deleted[type]);
+    }
+    if (d.notes) DB.notes = mergeById(DB.notes, d.notes, {});
+    if (d.diary) DB.diary = mergeById(DB.diary, d.diary, {});
+    if (d.archive) {
+      for (const type of SYNC_TYPES) {
+        DB.archive[type] = mergeById(DB.archive[type], (d.archive || {})[type], {});
+      }
+    }
+    saveLocalOnly(); renderAll();
+    setSyncStatus(true, 'Real-time ✓');
+    showToast('🔔 নতুন আপডেট এসেছে (Telegram/অন্য ডিভাইস থেকে)');
   });
 }
 
