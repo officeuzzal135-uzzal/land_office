@@ -1214,11 +1214,15 @@ async function pullFromFirebase() {
 
 function startFirebaseSync() {
   if (!fbDb) return;
+  let isFirstSnapshot = true; // পেজ খোলার পর listener এর প্রথম reading — এটা নতুন event না, তাই notification দেখাবো না
   // Real-time listener — Telegram বট বা অন্য ডিভাইস থেকে কিছু যোগ হলে সাথে সাথে এখানেও দেখা যাবে
   window._fbOnValue(window._fbRef(fbDb, FB_PATH), (snap) => {
-    if (!snap.exists()) return;
+    if (!snap.exists()) { isFirstSnapshot = false; return; }
     const d = snap.val();
-    if (!d.updatedAt) return;
+    if (!d.updatedAt) { isFirstSnapshot = false; return; }
+
+    const firstLoad = isFirstSnapshot;
+    isFirstSnapshot = false;
 
     // এই update টা নিজের পাঠানো push এর প্রতিধ্বনি কিনা চেক করি — হলে কিছুই করার দরকার নেই
     if (d.updatedAt === window._lastPushStamp) return;
@@ -1227,8 +1231,8 @@ function startFirebaseSync() {
     if (d.updatedAt === window._lastSeenRemoteStamp) return;
     window._lastSeenRemoteStamp = d.updatedAt;
 
-    // নিজের সাম্প্রতিক local পরিবর্তনের চেয়ে পুরোনো হলে — এটা আমাদেরই পাঠানো ডেটা ফিরে এসেছে, স্কিপ করি
-    if (d.updatedAt <= (window._lastLocalUpdate || 0)) return;
+    // প্রথমবার লোড না হলে, এবং নিজের সাম্প্রতিক local পরিবর্তনের চেয়ে পুরোনো হলে — স্কিপ করি
+    if (!firstLoad && d.updatedAt <= (window._lastLocalUpdate || 0)) return;
 
     if (d.deleted) {
       for (const type of Object.keys(DB.deleted)) {
@@ -1246,8 +1250,12 @@ function startFirebaseSync() {
       }
     }
     saveLocalOnly(); renderAll();
-    setSyncStatus(true, 'Real-time ✓');
-    showToast('🔔 নতুন আপডেট এসেছে (Telegram/অন্য ডিভাইস থেকে)');
+    setSyncStatus(true, firstLoad ? 'Synced ✓' : 'Real-time ✓');
+
+    // প্রথমবার পেজ লোড হওয়ার সময়কার sync কে "নতুন আপডেট" হিসেবে দেখানো হবে না — এটা স্বাভাবিক প্রথম sync
+    if (!firstLoad) {
+      showToast('🔔 নতুন আপডেট এসেছে (Telegram/অন্য ডিভাইস থেকে)');
+    }
   });
 }
 
