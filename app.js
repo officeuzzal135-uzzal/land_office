@@ -63,6 +63,12 @@ function markDeleted(type, id) {
   DB.deleted[type][id] = Date.now();
 }
 
+// tombstone-যুক্ত কাজ (archive/permanent-delete) এর পর দেরি না করে সাথে সাথে Firebase এ push করে —
+// যাতে অন্য ট্যাব/ডিভাইস/Telegram বট দ্রুত tombstone টা পায় এবং পুরোনো ডেটা merge হয়ে আবার ফিরে না আসে
+function pushNow() {
+  if (fbDb) { clearTimeout(window._fbDebounce); pushToFirebase(); }
+}
+
 function uid() { return Date.now() + Math.floor(Math.random() * 1000); }
 
 // ══════════════════════════════════════════
@@ -216,7 +222,7 @@ function archiveHaat(id) {
   item.archivedAt = Date.now();
   DB.archive.haat.unshift(item);
   markDeleted('haat', id); // active list থেকে সরানো হলো — sync এ যেন remote থেকে আবার ফিরে না আসে
-  saveDB(); renderAll(); showToast('🗄️ আর্কাইভে সরানো হয়েছে');
+  saveDB(); renderAll(); pushNow(); showToast('🗄️ আর্কাইভে সরানো হয়েছে');
 }
 
 function renderHaat() {
@@ -323,7 +329,7 @@ function archiveVp(id) {
   item.archivedAt = Date.now();
   DB.archive.vp.unshift(item);
   markDeleted('vp', id);
-  saveDB(); renderAll(); showToast('🗄️ আর্কাইভে সরানো হয়েছে');
+  saveDB(); renderAll(); pushNow(); showToast('🗄️ আর্কাইভে সরানো হয়েছে');
 }
 
 function renderVp() {
@@ -440,7 +446,7 @@ function archiveChithi(id) {
   item.archivedAt = Date.now();
   DB.archive.chithi.unshift(item);
   markDeleted('chithi', id);
-  saveDB(); renderAll(); showToast('🗄️ আর্কাইভে সরানো হয়েছে');
+  saveDB(); renderAll(); pushNow(); showToast('🗄️ আর্কাইভে সরানো হয়েছে');
 }
 
 function renderChithi() {
@@ -531,7 +537,7 @@ function archiveKaj(id) {
   item.archivedAt = Date.now();
   DB.archive.kaj.unshift(item);
   markDeleted('kaj', id);
-  saveDB(); renderAll(); showToast('🗄️ আর্কাইভে সরানো হয়েছে');
+  saveDB(); renderAll(); pushNow(); showToast('🗄️ আর্কাইভে সরানো হয়েছে');
 }
 
 function renderKaj() {
@@ -765,7 +771,7 @@ function markPaidDone(id) {
   item.archivedAt = Date.now();
   DB.archive.paid.unshift(item);
   markDeleted('paid', id);
-  saveDB(); renderAll();
+  saveDB(); renderAll(); pushNow();
   showToast('✅ সম্পন্ন হয়ে আর্কাইভে সরানো হয়েছে');
 }
 function archivePaid(id) {
@@ -775,7 +781,7 @@ function archivePaid(id) {
   item.archivedAt = Date.now();
   DB.archive.paid.unshift(item);
   markDeleted('paid', id);
-  saveDB(); renderAll(); showToast('🗄️ আর্কাইভে সরানো হয়েছে');
+  saveDB(); renderAll(); pushNow(); showToast('🗄️ আর্কাইভে সরানো হয়েছে');
 }
 
 function renderPaid() {
@@ -873,7 +879,7 @@ function markMutationDone(id) {
   item.archivedAt = Date.now();
   DB.archive.mutation.unshift(item);
   markDeleted('mutation', id);
-  saveDB(); renderAll();
+  saveDB(); renderAll(); pushNow();
   showToast('✅ সম্পন্ন হয়ে আর্কাইভে সরানো হয়েছে');
 }
 function archiveMutation(id) {
@@ -883,7 +889,7 @@ function archiveMutation(id) {
   item.archivedAt = Date.now();
   DB.archive.mutation.unshift(item);
   markDeleted('mutation', id);
-  saveDB(); renderAll(); showToast('🗄️ আর্কাইভে সরানো হয়েছে');
+  saveDB(); renderAll(); pushNow(); showToast('🗄️ আর্কাইভে সরানো হয়েছে');
 }
 
 function renderMutation() {
@@ -937,7 +943,7 @@ function restoreArchive(type, id) {
   const targetMap = { haat: 'haat', vp: 'vp', chithi: 'chithi', kaj: 'kaj', paid: 'paid', mutation: 'mutation' };
   DB[targetMap[type]].unshift(item);
   if (DB.deleted[type]) delete DB.deleted[type][id]; // active তে ফিরিয়ে আনা হলো — tombstone তুলে নেওয়া হলো যাতে sync এ আবার আসতে পারে
-  saveDB(); renderAll();
+  saveDB(); renderAll(); pushNow();
   showToast('↩️ পুনরুদ্ধার করা হয়েছে');
 }
 
@@ -945,7 +951,7 @@ function permanentDeleteArchive(type, id) {
   if (!confirm('এটি স্থায়ীভাবে মুছে যাবে। আপনি কি নিশ্চিত?')) return;
   DB.archive[type] = DB.archive[type].filter(i => i.id != id);
   markDeleted(type, id); // স্থায়ী মুছে ফেলা — tombstone থেকে যাবে যাতে sync এ remote থেকে আবার না আসে
-  saveDB(); renderAll();
+  saveDB(); renderAll(); pushNow();
   showToast('🗑️ স্থায়ীভাবে মুছে ফেলা হয়েছে');
 }
 
@@ -1161,7 +1167,7 @@ async function pushToFirebase() {
         if (remote.diary) DB.diary = mergeById(DB.diary, remote.diary, {});
         if (remote.archive) {
           for (const type of SYNC_TYPES) {
-            DB.archive[type] = mergeById(DB.archive[type], (remote.archive || {})[type], {});
+            DB.archive[type] = mergeById(DB.archive[type], (remote.archive || {})[type], DB.deleted[type]);
           }
         }
       }
@@ -1203,7 +1209,7 @@ async function pullFromFirebase() {
       if (d.diary) DB.diary = mergeById(DB.diary, d.diary, {});
       if (d.archive) {
         for (const type of SYNC_TYPES) {
-          DB.archive[type] = mergeById(DB.archive[type], (d.archive || {})[type], {});
+          DB.archive[type] = mergeById(DB.archive[type], (d.archive || {})[type], DB.deleted[type]);
         }
       }
       saveLocalOnly(); renderAll();
@@ -1246,7 +1252,7 @@ function startFirebaseSync() {
     if (d.diary) DB.diary = mergeById(DB.diary, d.diary, {});
     if (d.archive) {
       for (const type of SYNC_TYPES) {
-        DB.archive[type] = mergeById(DB.archive[type], (d.archive || {})[type], {});
+        DB.archive[type] = mergeById(DB.archive[type], (d.archive || {})[type], DB.deleted[type]);
       }
     }
     saveLocalOnly(); renderAll();
