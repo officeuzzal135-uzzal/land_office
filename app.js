@@ -22,9 +22,10 @@ let DB = {
     haat: [], vp: [], chithi: [], kaj: [], paid: [], mutation: []
   },
   // 'deleted' = active list থেকে সরানো (archive এ থাকে এটার ভিত্তিতে) — sync এ active list এ আবার ফিরে না আসে
-  deleted: { haat: {}, vp: {}, chithi: {}, kaj: {}, paid: {}, mutation: {} },
+  // (note, diary এখানে যুক্ত করা হয়েছে যাতে এগুলো ডিলিট করলে Firebase sync এর সময় আর ফিরে না আসে — আগের বাগ ফিক্স)
+  deleted: { haat: {}, vp: {}, chithi: {}, kaj: {}, paid: {}, mutation: {}, notes: {}, diary: {} },
   // 'purged' = স্থায়ীভাবে সব জায়গা থেকে মুছে ফেলা (active + archive দুই জায়গা থেকেই) — শুধু permanent delete এর জন্য
-  purged: { haat: {}, vp: {}, chithi: {}, kaj: {}, paid: {}, mutation: {} },
+  purged: { haat: {}, vp: {}, chithi: {}, kaj: {}, paid: {}, mutation: {}, notes: {}, diary: {} },
   settings: { tgToken: '', tgChatId: '', fbConfig: null }
 };
 
@@ -224,6 +225,56 @@ function esc(str) {
 }
 
 // ══════════════════════════════════════════
+//  রিমাইন্ডার — হেল্পার ফাংশন (সব মডিউলে রিইউজ করার জন্য)
+// ══════════════════════════════════════════
+// HTML input[type=datetime-local] থেকে মান নিয়ে আসে; খালি থাকলে '' রিটার্ন করে (no reminder)
+function getReminderInput(prefix) {
+  const el = document.getElementById(prefix + '-reminder');
+  return el ? el.value : '';
+}
+// edit মোডে আগের রিমাইন্ডার মান বসিয়ে দেয়
+function setReminderInput(prefix, value) {
+  const el = document.getElementById(prefix + '-reminder');
+  if (el) el.value = value || '';
+}
+// একটা আইটেমের রিমাইন্ডার পেন্ডিং কিনা (ভবিষ্যতে আছে, এখনও পাঠানো হয়নি) — কার্ডে দেখানোর জন্য
+function reminderStatus(iso) {
+  if (!iso) return null;
+  const t = new Date(iso).getTime();
+  if (isNaN(t)) return null;
+  const now = Date.now();
+  const diffH = (t - now) / 3600000;
+  if (diffH < 0) return 'overdue';
+  if (diffH <= 24) return 'today';
+  return 'upcoming';
+}
+function reminderLabel(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '';
+  const dateStr = d.toLocaleDateString('bn-BD', { day: 'numeric', month: 'short', year: 'numeric' });
+  const timeStr = d.toLocaleTimeString('bn-BD', { hour: '2-digit', minute: '2-digit' });
+  return `${dateStr}, ${timeStr}`;
+}
+// একটা আইটেমে নতুন ডেটা apply করার সময় — যদি রিমাইন্ডার এর তারিখ/সময় বদলায়, তাহলে আগের
+// reminderSent ফ্ল্যাগ রিসেট হয়ে যায়, যাতে নতুন সময়ে আবার ঠিকমতো নোটিফিকেশন যায়
+function applyWithReminderReset(item, data) {
+  const reminderChanged = (item.reminder || '') !== (data.reminder || '');
+  Object.assign(item, data);
+  if (reminderChanged) item.reminderSent = false;
+}
+
+// কোনো আইটেমে রিমাইন্ডার থাকলে কার্ডে ছোট পিল হিসেবে দেখানোর HTML
+function reminderBadgeHTML(iso) {
+  if (!iso) return '';
+  const status = reminderStatus(iso);
+  if (!status) return '';
+  const cls = status === 'overdue' ? 'overdue' : status === 'today' ? 'today' : 'upcoming';
+  const label = status === 'overdue' ? 'মিস হয়েছে' : status === 'today' ? 'আজ/২৪ ঘণ্টার মধ্যে' : 'আসছে';
+  return `<span class="reminder-pill ${cls}" title="${esc(reminderLabel(iso))}">🔔 ${label} · ${esc(reminderLabel(iso))}</span>`;
+}
+
+// ══════════════════════════════════════════
 //  HAAT-BAZAR
 // ══════════════════════════════════════════
 let haatFilter = 'all';
@@ -246,6 +297,7 @@ function openHaatModal(id) {
     document.getElementById('haat-due').value = item.due || '';
     document.getElementById('haat-date').value = item.date || '';
     document.getElementById('haat-dcr').value = item.dcr || '';
+    setReminderInput('haat', item.reminder);
   } else {
     document.getElementById('haat-name').value = '';
     document.getElementById('haat-case').value = '';
@@ -254,6 +306,7 @@ function openHaatModal(id) {
     document.getElementById('haat-due').value = '';
     document.getElementById('haat-date').value = todayISO();
     document.getElementById('haat-dcr').value = '';
+    setReminderInput('haat', '');
   }
   openModalEl('haat-modal');
 }
@@ -270,12 +323,13 @@ function saveHaat() {
     due: Number(document.getElementById('haat-due').value) || 0,
     date: document.getElementById('haat-date').value || todayISO(),
     dcr: document.getElementById('haat-dcr').value.trim(),
+    reminder: getReminderInput('haat'),
   };
   if (id) {
     const item = DB.haat.find(i => i.id == id);
-    Object.assign(item, data);
+    applyWithReminderReset(item, data);
   } else {
-    DB.haat.unshift({ id: uid(), status: 'pending', ...data });
+    DB.haat.unshift({ id: uid(), status: 'pending', reminderSent: false, ...data });
   }
   saveDB(); renderAll(); closeModal('haat-modal');
   showToast('✅ হাট-বাজার এন্ট্রি সংরক্ষিত হয়েছে');
@@ -317,6 +371,7 @@ function renderHaat() {
           <div class="item">তারিখ: <b>${formatDate(i.date)}</b></div>
           ${i.dcr ? `<div class="item">DCR: <b>${esc(i.dcr)}</b></div>` : ''}
         </div>
+        ${i.reminder ? `<div class="card-body-row">${reminderBadgeHTML(i.reminder)}</div>` : ''}
         <div class="card-actions">
           <button class="btn-ghost" onclick="openHaatModal(${i.id})">✏️ সম্পাদনা</button>
           ${i.status !== 'done' ? `<button class="btn-success" onclick="markHaatDone(${i.id})">✓ সম্পন্ন</button>` : ''}
@@ -353,6 +408,7 @@ function openVpModal(id) {
     document.getElementById('vp-due').value = item.due || '';
     document.getElementById('vp-date').value = item.date || '';
     document.getElementById('vp-dcr').value = item.dcr || '';
+    setReminderInput('vp', item.reminder);
   } else {
     document.getElementById('vp-name').value = '';
     document.getElementById('vp-case').value = '';
@@ -361,6 +417,7 @@ function openVpModal(id) {
     document.getElementById('vp-due').value = '';
     document.getElementById('vp-date').value = todayISO();
     document.getElementById('vp-dcr').value = '';
+    setReminderInput('vp', '');
   }
   openModalEl('vp-modal');
 }
@@ -377,12 +434,13 @@ function saveVp() {
     due: Number(document.getElementById('vp-due').value) || 0,
     date: document.getElementById('vp-date').value || todayISO(),
     dcr: document.getElementById('vp-dcr').value.trim(),
+    reminder: getReminderInput('vp'),
   };
   if (id) {
     const item = DB.vp.find(i => i.id == id);
-    Object.assign(item, data);
+    applyWithReminderReset(item, data);
   } else {
-    DB.vp.unshift({ id: uid(), status: 'pending', ...data });
+    DB.vp.unshift({ id: uid(), status: 'pending', reminderSent: false, ...data });
   }
   saveDB(); renderAll(); closeModal('vp-modal');
   showToast('✅ ভিপি এন্ট্রি সংরক্ষিত হয়েছে');
@@ -424,6 +482,7 @@ function renderVp() {
           <div class="item">তারিখ: <b>${formatDate(i.date)}</b></div>
           ${i.dcr ? `<div class="item">DCR: <b>${esc(i.dcr)}</b></div>` : ''}
         </div>
+        ${i.reminder ? `<div class="card-body-row">${reminderBadgeHTML(i.reminder)}</div>` : ''}
         <div class="card-actions">
           <button class="btn-ghost" onclick="openVpModal(${i.id})">✏️ সম্পাদনা</button>
           ${i.status !== 'done' ? `<button class="btn-success" onclick="markVpDone(${i.id})">✓ সম্পন্ন</button>` : ''}
@@ -451,6 +510,7 @@ function openChithiModal(id) {
     document.getElementById('chithi-subject').value = item.subject || '';
     document.getElementById('chithi-date').value = item.date || '';
     document.getElementById('chithi-comment').value = item.comment || '';
+    setReminderInput('chithi', item.reminder);
 
     if (['UNO','ADC(R)','ULAO'].includes(item.sender)) {
       senderSel.value = item.sender;
@@ -479,6 +539,7 @@ function openChithiModal(id) {
     document.getElementById('chithi-receiver-manual').style.display = 'none';
     document.getElementById('chithi-sender-manual').value = '';
     document.getElementById('chithi-receiver-manual').value = '';
+    setReminderInput('chithi', '');
   }
   openModalEl('chithi-modal');
 }
@@ -498,12 +559,13 @@ function saveChithi() {
     receiver,
     date: document.getElementById('chithi-date').value || todayISO(),
     comment: document.getElementById('chithi-comment').value.trim(),
+    reminder: getReminderInput('chithi'),
   };
   if (id) {
     const item = DB.chithi.find(i => i.id == id);
-    Object.assign(item, data);
+    applyWithReminderReset(item, data);
   } else {
-    DB.chithi.unshift({ id: uid(), ...data });
+    DB.chithi.unshift({ id: uid(), reminderSent: false, ...data });
   }
   saveDB(); renderAll(); closeModal('chithi-modal');
   showToast('✅ চিঠি সংরক্ষিত হয়েছে');
@@ -539,6 +601,7 @@ function renderChithi() {
         <div class="item">প্রাপক: <b>${esc(i.receiver)}</b></div>
       </div>
       ${i.comment ? `<div class="card-body-row"><div class="item" style="width:100%">মন্তব্য: <b>${esc(i.comment)}</b></div></div>` : ''}
+      ${i.reminder ? `<div class="card-body-row">${reminderBadgeHTML(i.reminder)}</div>` : ''}
       <div class="card-actions">
         <button class="btn-ghost" onclick="openChithiModal(${i.id})">✏️ সম্পাদনা</button>
         <button class="btn-danger" onclick="archiveChithi(${i.id})">🗄️ আর্কাইভ</button>
@@ -567,11 +630,13 @@ function openKajModal(id) {
     document.getElementById('kaj-detail').value = item.detail || '';
     document.getElementById('kaj-status').value = item.status || '';
     document.getElementById('kaj-date').value = item.date || '';
+    setReminderInput('kaj', item.reminder);
   } else {
     document.getElementById('kaj-title').value = '';
     document.getElementById('kaj-detail').value = '';
     document.getElementById('kaj-status').value = '';
     document.getElementById('kaj-date').value = todayISO();
+    setReminderInput('kaj', '');
   }
   openModalEl('kaj-modal');
 }
@@ -585,12 +650,13 @@ function saveKaj() {
     detail: document.getElementById('kaj-detail').value.trim(),
     status: document.getElementById('kaj-status').value.trim(),
     date: document.getElementById('kaj-date').value || todayISO(),
+    reminder: getReminderInput('kaj'),
   };
   if (id) {
     const item = DB.kaj.find(i => i.id == id);
-    Object.assign(item, data);
+    applyWithReminderReset(item, data);
   } else {
-    DB.kaj.unshift({ id: uid(), done: false, ...data });
+    DB.kaj.unshift({ id: uid(), done: false, reminderSent: false, ...data });
   }
   saveDB(); renderAll(); closeModal('kaj-modal');
   showToast('✅ কাজ সংরক্ষিত হয়েছে');
@@ -630,6 +696,7 @@ function renderKaj() {
       </div>
       ${i.detail ? `<div class="card-body-row"><div class="item" style="width:100%">${esc(i.detail)}</div></div>` : ''}
       ${i.status ? `<div class="card-body-row"><div class="item">অবস্থা: <b>${esc(i.status)}</b></div></div>` : ''}
+      ${i.reminder ? `<div class="card-body-row">${reminderBadgeHTML(i.reminder)}</div>` : ''}
       <div class="card-actions">
         <button class="btn-ghost" onclick="openKajModal(${i.id})">✏️ সম্পাদনা</button>
         ${!i.done ? `<button class="btn-success" onclick="markKajDone(${i.id})">✓ সম্পন্ন</button>` : ''}
@@ -649,9 +716,11 @@ function openNoteModal(id) {
     const item = DB.notes.find(i => i.id == id);
     document.getElementById('note-title').value = item.title || '';
     document.getElementById('note-body').value = item.body || '';
+    setReminderInput('note', item.reminder);
   } else {
     document.getElementById('note-title').value = '';
     document.getElementById('note-body').value = '';
+    setReminderInput('note', '');
   }
   openModalEl('note-modal');
 }
@@ -664,12 +733,15 @@ function saveNote() {
     title,
     body: document.getElementById('note-body').value.trim(),
     date: todayISO(),
+    reminder: getReminderInput('note'),
   };
   if (id) {
     const item = DB.notes.find(i => i.id == id);
+    const reminderChanged = (item.reminder || '') !== (data.reminder || '');
     Object.assign(item, data, { date: item.date });
+    if (reminderChanged) item.reminderSent = false;
   } else {
-    DB.notes.unshift({ id: uid(), ...data });
+    DB.notes.unshift({ id: uid(), reminderSent: false, ...data });
   }
   saveDB(); renderAll(); closeModal('note-modal');
   showToast('✅ নোট সংরক্ষিত হয়েছে');
@@ -678,10 +750,10 @@ function saveNote() {
 function deleteNote(id) {
   if (!confirm('নোটটি মুছে ফেলতে চান?')) return;
   DB.notes = DB.notes.filter(i => i.id != id);
-  saveDB(); renderAll();
+  markDeleted('notes', id); // বাগ ফিক্স: tombstone রাখা হচ্ছে যাতে sync এর সময় আবার ফিরে না আসে
+  saveDB(); renderAll(); pushNow();
   showToast('নোট মুছে ফেলা হয়েছে');
 }
-// নোট ও ডায়েরির tombstone রাখা হচ্ছে না কারণ এগুলো archive সিস্টেমের বাইরে — সরাসরি ডিলিট হয়
 
 function renderNotes() {
   const list = document.getElementById('notes-list');
@@ -696,6 +768,7 @@ function renderNotes() {
         <span class="card-meta">${formatDate(i.date)}</span>
       </div>
       ${i.body ? `<div class="card-body-row"><div class="item" style="width:100%">${esc(i.body).replace(/\n/g,'<br>')}</div></div>` : ''}
+      ${i.reminder ? `<div class="card-body-row">${reminderBadgeHTML(i.reminder)}</div>` : ''}
       <div class="card-actions">
         <button class="btn-ghost" onclick="openNoteModal(${i.id})">✏️ সম্পাদনা</button>
         <button class="btn-danger" onclick="deleteNote(${i.id})">🗑️ মুছুন</button>
@@ -742,7 +815,8 @@ function saveDiary() {
 function deleteDiary(id) {
   if (!confirm('এই লেখাটি মুছে ফেলতে চান?')) return;
   DB.diary = DB.diary.filter(i => i.id != id);
-  saveDB(); renderAll();
+  markDeleted('diary', id); // বাগ ফিক্স: tombstone রাখা হচ্ছে যাতে sync এর সময় আবার ফিরে না আসে
+  saveDB(); renderAll(); pushNow();
   showToast('ডায়েরি মুছে ফেলা হয়েছে');
 }
 
@@ -798,6 +872,7 @@ function openPaidModal(id) {
     document.getElementById('paid-date').value = item.date || '';
     document.getElementById('paid-detail').value = item.detail || '';
     document.getElementById('paid-progress').value = item.progress || '';
+    setReminderInput('paid', item.reminder);
   } else {
     document.getElementById('paid-type').value = 'haat-bazar';
     document.getElementById('paid-name').value = '';
@@ -806,6 +881,7 @@ function openPaidModal(id) {
     document.getElementById('paid-date').value = todayISO();
     document.getElementById('paid-detail').value = '';
     document.getElementById('paid-progress').value = '';
+    setReminderInput('paid', '');
   }
   openModalEl('paid-modal');
 }
@@ -822,12 +898,13 @@ function savePaid() {
     date: document.getElementById('paid-date').value || todayISO(),
     detail: document.getElementById('paid-detail').value.trim(),
     progress: document.getElementById('paid-progress').value.trim(),
+    reminder: getReminderInput('paid'),
   };
   if (id) {
     const item = DB.paid.find(i => i.id == id);
-    Object.assign(item, data);
+    applyWithReminderReset(item, data);
   } else {
-    DB.paid.unshift({ id: uid(), done: false, ...data });
+    DB.paid.unshift({ id: uid(), done: false, reminderSent: false, ...data });
   }
   saveDB(); renderAll(); closeModal('paid-modal');
   showToast('✅ পেইড ওয়ার্ক সংরক্ষিত হয়েছে');
@@ -878,6 +955,7 @@ function renderPaid() {
         </div>
         ${i.detail ? `<div class="card-body-row"><div class="item" style="width:100%">বিবরণ: ${esc(i.detail)}</div></div>` : ''}
         ${i.progress ? `<div class="card-body-row"><div class="item" style="width:100%">অগ্রগতি: ${esc(i.progress)}</div></div>` : ''}
+        ${i.reminder ? `<div class="card-body-row">${reminderBadgeHTML(i.reminder)}</div>` : ''}
         <div class="card-actions">
           <button class="btn-ghost" onclick="openPaidModal(${i.id})">✏️ সম্পাদনা</button>
           ${!i.done ? `<button class="btn-success" onclick="markPaidDone(${i.id})">✓ সম্পন্ন</button>` : ''}
@@ -909,12 +987,14 @@ function openMutationModal(id) {
     document.getElementById('mutation-amount').value = item.amount || '';
     document.getElementById('mutation-due').value = item.due || '';
     document.getElementById('mutation-note').value = item.note || '';
+    setReminderInput('mutation', item.reminder);
   } else {
     document.getElementById('mutation-name').value = '';
     document.getElementById('mutation-case').value = '';
     document.getElementById('mutation-amount').value = '';
     document.getElementById('mutation-due').value = '';
     document.getElementById('mutation-note').value = '';
+    setReminderInput('mutation', '');
   }
   openModalEl('mutation-modal');
 }
@@ -930,12 +1010,15 @@ function saveMutation() {
     due: Number(document.getElementById('mutation-due').value) || 0,
     note: document.getElementById('mutation-note').value.trim(),
     date: todayISO(),
+    reminder: getReminderInput('mutation'),
   };
   if (id) {
     const item = DB.mutation.find(i => i.id == id);
+    const reminderChanged = (item.reminder || '') !== (data.reminder || '');
     Object.assign(item, data, { date: item.date });
+    if (reminderChanged) item.reminderSent = false;
   } else {
-    DB.mutation.unshift({ id: uid(), done: false, ...data });
+    DB.mutation.unshift({ id: uid(), done: false, reminderSent: false, ...data });
   }
   saveDB(); renderAll(); closeModal('mutation-modal');
   showToast('✅ মিউটেশন এন্ট্রি সংরক্ষিত হয়েছে');
@@ -985,6 +1068,7 @@ function renderMutation() {
         <div class="item">বকেয়া: <b>${money(i.due)}</b></div>
       </div>
       ${i.note ? `<div class="card-body-row"><div class="item" style="width:100%">নোট: ${esc(i.note)}</div></div>` : ''}
+      ${i.reminder ? `<div class="card-body-row">${reminderBadgeHTML(i.reminder)}</div>` : ''}
       <div class="card-actions">
         <button class="btn-ghost" onclick="openMutationModal(${i.id})">✏️ সম্পাদনা</button>
         ${!i.done ? `<button class="btn-success" onclick="markMutationDone(${i.id})">✓ সম্পন্ন</button>` : ''}
@@ -1071,6 +1155,42 @@ function renderArchive() {
 // ══════════════════════════════════════════
 //  DASHBOARD
 // ══════════════════════════════════════════
+// সব সেকশন থেকে রিমাইন্ডার-যুক্ত (এখনও পাঠানো হয়নি এমন না — সব রিমাইন্ডারই) এন্ট্রি একসাথে জোগাড় করে,
+// ওভারডিউ আগে, তারপর সময় অনুযায়ী সাজিয়ে রিটার্ন করে — ড্যাশবোর্ডে দেখানোর জন্য
+function getAllReminders() {
+  const sources = [
+    { type: 'haat', label: 'হাট-বাজার', icon: '🛒', tab: 'haat', items: DB.haat, titleKey: 'name' },
+    { type: 'vp', label: 'ভিপি', icon: '🗺️', tab: 'vp', items: DB.vp, titleKey: 'name' },
+    { type: 'chithi', label: 'চিঠিপত্র', icon: '✉️', tab: 'chithi', items: DB.chithi, titleKey: 'subject' },
+    { type: 'kaj', label: 'কাজ', icon: '✅', tab: 'kaj', items: DB.kaj, titleKey: 'title' },
+    { type: 'notes', label: 'নোট', icon: '🗒️', tab: 'diary', items: DB.notes, titleKey: 'title' },
+    { type: 'paid', label: 'পেইড ওয়ার্ক', icon: '💵', tab: 'more', items: DB.paid, titleKey: 'name' },
+    { type: 'mutation', label: 'মিউটেশন', icon: '📑', tab: 'more', items: DB.mutation, titleKey: 'name' },
+  ];
+  const out = [];
+  for (const src of sources) {
+    for (const item of (src.items || [])) {
+      if (!item.reminder) continue;
+      const status = reminderStatus(item.reminder);
+      if (!status) continue;
+      out.push({
+        id: item.id, type: src.type, tab: src.tab, icon: src.icon, label: src.label,
+        title: item[src.titleKey] || '(শিরোনামহীন)', reminder: item.reminder, status
+      });
+    }
+  }
+  out.sort((a, b) => new Date(a.reminder) - new Date(b.reminder));
+  return out;
+}
+
+// ড্যাশবোর্ডের রিমাইন্ডার লিস্টে ক্লিক করলে সংশ্লিষ্ট ট্যাবে নিয়ে যাবে
+function goToReminderItem(tab, type) {
+  if (type === 'paid') { openMoreSubtab('paid'); return; }
+  if (type === 'mutation') { openMoreSubtab('mutation'); return; }
+  showTab(tab);
+  if (type === 'notes') showDiarySub('note');
+}
+
 function renderDashboard() {
   document.getElementById('dash-haat-count').textContent = DB.haat.filter(i=>i.status!=='done').length;
   document.getElementById('dash-vp-count').textContent = DB.vp.filter(i=>i.status!=='done').length;
@@ -1084,6 +1204,27 @@ function renderDashboard() {
   document.getElementById('dash-total-joma').textContent = money(totalJoma);
   document.getElementById('dash-total-bokeya').textContent = money(totalBokeya);
   document.getElementById('dash-total-mot').textContent = money(totalJoma + totalBokeya);
+
+  // 🔔 রিমাইন্ডার কার্ড — ওভারডিউ ও আজকের/আসন্ন রিমাইন্ডার থাকলে দেখাবে, না থাকলে কার্ড লুকানো থাকবে
+  const reminders = getAllReminders();
+  const remCard = document.getElementById('dash-reminders-card');
+  const remList = document.getElementById('dash-reminders-list');
+  if (!reminders.length) {
+    remCard.style.display = 'none';
+  } else {
+    remCard.style.display = 'block';
+    remList.innerHTML = reminders.map(r => `
+      <div class="reminder-item" style="cursor:pointer" onclick="goToReminderItem('${r.tab}','${r.type}')">
+        <div>
+          <div class="r-title">${r.icon} ${esc(r.title)}</div>
+          <div class="r-meta">${esc(r.label)} · ${esc(reminderLabel(r.reminder))}</div>
+        </div>
+        <span class="reminder-pill ${r.status === 'overdue' ? 'overdue' : r.status === 'today' ? 'today' : 'upcoming'}">
+          ${r.status === 'overdue' ? 'মিস হয়েছে' : r.status === 'today' ? 'আজ/২৪ ঘ.' : 'আসছে'}
+        </span>
+      </div>
+    `).join('');
+  }
 
   const recent = DB.kaj.filter(i=>!i.done).slice(0, 5);
   const recentBox = document.getElementById('dash-recent-tasks');
@@ -1101,6 +1242,7 @@ function renderDashboard() {
     `).join('');
   }
 }
+
 
 // ══════════════════════════════════════════
 //  RENDER ALL
@@ -1234,13 +1376,30 @@ function purgeDeletedEverywhere() {
       DB.archive[type] = (DB.archive[type] || []).filter(i => !purgedIds.has(String(i.id)));
     }
   }
+  // নোট ও ডায়েরির জন্য — এগুলোর archive নেই, সরাসরি ডিলিট হয়। তাই শুধু active list থেকে
+  // tombstone এ থাকা id বাদ দেওয়া হয় (বাগ ফিক্স: আগে এই দুটো এই safety-net এর বাইরে ছিল)
+  for (const type of SIMPLE_SYNC_TYPES) {
+    const dmap = DB.deleted[type] || {};
+    const deletedIds = new Set(Object.keys(dmap).map(String));
+    if (deletedIds.size) {
+      DB[type] = (DB[type] || []).filter(i => !deletedIds.has(String(i.id)));
+    }
+  }
 }
 
 const SYNC_TYPES = ['haat', 'vp', 'chithi', 'kaj', 'paid', 'mutation'];
+// notes ও diary — archive সিস্টেমের বাইরে, সরাসরি ডিলিট হয়, কিন্তু এখন থেকে tombstone ব্যবহার করবে
+// যাতে Firebase sync এর সময় ডিলিট করা আইটেম আবার ফিরে না আসে (বাগ ফিক্স)
+const SIMPLE_SYNC_TYPES = ['notes', 'diary'];
 
 // active list এর জন্য — deleted (archived) এবং purged (স্থায়ী মুছে ফেলা) দুটো মিলিয়ে একটা combined tombstone map দেয়
 function combinedTombstone(type) {
   return { ...(DB.deleted[type] || {}), ...(DB.purged[type] || {}) };
+}
+
+// notes/diary এর জন্য — শুধু deleted tombstone (এদের purged/archive ধারণা নেই)
+function simpleTombstone(type) {
+  return { ...(DB.deleted[type] || {}) };
 }
 
 async function pushToFirebase() {
@@ -1264,8 +1423,10 @@ async function pushToFirebase() {
         for (const type of SYNC_TYPES) {
           DB[type] = mergeById(DB[type], remote[type], combinedTombstone(type));
         }
-        if (remote.notes) DB.notes = mergeById(DB.notes, remote.notes, {});
-        if (remote.diary) DB.diary = mergeById(DB.diary, remote.diary, {});
+        // বাগ ফিক্স: notes/diary এখন tombstone সম্মান করে merge হয়, যাতে ডিলিট করা এন্ট্রি ফিরে না আসে
+        for (const type of SIMPLE_SYNC_TYPES) {
+          DB[type] = mergeById(DB[type], remote[type], simpleTombstone(type));
+        }
         if (remote.archive) {
           for (const type of SYNC_TYPES) {
             DB.archive[type] = mergeById(DB.archive[type], (remote.archive || {})[type], DB.purged[type]);
@@ -1313,8 +1474,10 @@ async function pullFromFirebase() {
       for (const type of SYNC_TYPES) {
         if (d[type]) DB[type] = mergeById(DB[type], d[type], combinedTombstone(type));
       }
-      if (d.notes) DB.notes = mergeById(DB.notes, d.notes, {});
-      if (d.diary) DB.diary = mergeById(DB.diary, d.diary, {});
+      // বাগ ফিক্স: notes/diary এখন tombstone সম্মান করে merge হয়
+      for (const type of SIMPLE_SYNC_TYPES) {
+        if (d[type]) DB[type] = mergeById(DB[type], d[type], simpleTombstone(type));
+      }
       if (d.archive) {
         for (const type of SYNC_TYPES) {
           DB.archive[type] = mergeById(DB.archive[type], (d.archive || {})[type], DB.purged[type]);
@@ -1362,8 +1525,10 @@ function startFirebaseSync() {
     for (const type of SYNC_TYPES) {
       if (d[type]) DB[type] = mergeById(DB[type], d[type], combinedTombstone(type));
     }
-    if (d.notes) DB.notes = mergeById(DB.notes, d.notes, {});
-    if (d.diary) DB.diary = mergeById(DB.diary, d.diary, {});
+    // বাগ ফিক্স: notes/diary এখন tombstone সম্মান করে merge হয়
+    for (const type of SIMPLE_SYNC_TYPES) {
+      if (d[type]) DB[type] = mergeById(DB[type], d[type], simpleTombstone(type));
+    }
     if (d.archive) {
       for (const type of SYNC_TYPES) {
         DB.archive[type] = mergeById(DB.archive[type], (d.archive || {})[type], DB.purged[type]);
@@ -1438,8 +1603,10 @@ function importData(e) {
         DB = {
           ...DB, ...data,
           archive: { ...DB.archive, ...(data.archive || {}) },
-          deleted: { ...DB.deleted, ...(data.deleted || {}) }
+          deleted: { ...DB.deleted, ...(data.deleted || {}) },
+          purged: { ...DB.purged, ...(data.purged || {}) }
         };
+        purgeDeletedEverywhere();
         saveDB(); renderAll();
         showToast('✅ ডেটা import হয়েছে');
       }
@@ -1490,3 +1657,7 @@ if (DB.settings.fbConfig) {
 } else {
   setSyncStatus(false, 'লোকাল মোড');
 }
+
+// প্রতি ১ মিনিটে ড্যাশবোর্ড রিফ্রেশ হয় — যাতে রিমাইন্ডারের অবস্থা (আসছে/আজ/মিস হয়েছে) সময়ের সাথে
+// এমনিতেই আপডেট হতে থাকে, পেজ রিলোড না করেও
+setInterval(renderDashboard, 60000);
