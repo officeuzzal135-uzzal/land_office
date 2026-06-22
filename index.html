@@ -261,6 +261,20 @@
   .status-badge.pending { background: rgba(251,191,36,0.15); color: var(--yellow); }
   .status-badge.info { background: rgba(79,124,255,0.15); color: var(--accent); }
 
+  .reminder-item {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 10px 0; border-bottom: 1px solid var(--border); gap: 10px;
+  }
+  .reminder-item:last-child { border-bottom: none; }
+  .reminder-item .r-title { font-size: 14px; font-weight: 500; }
+  .reminder-item .r-meta { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .reminder-pill {
+    padding: 4px 10px; border-radius: 20px; font-size: 11px; font-weight: 600; white-space: nowrap;
+  }
+  .reminder-pill.overdue { background: rgba(248,113,113,0.15); color: var(--red); }
+  .reminder-pill.today { background: rgba(251,191,36,0.15); color: var(--yellow); }
+  .reminder-pill.upcoming { background: rgba(79,124,255,0.15); color: var(--accent); }
+
   .filter-row { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
   .filter-chip {
     background: var(--surface); border: 1px solid var(--border);
@@ -459,6 +473,11 @@
           <div class="dash-count" id="dash-mutation-count">০</div>
           <div class="dash-label">মিউটেশন (চলমান)</div>
         </div>
+      </div>
+
+      <div class="card" id="dash-reminders-card" style="display:none">
+        <div class="card-title" style="margin-bottom:10px">🔔 রিমাইন্ডার</div>
+        <div id="dash-reminders-list"></div>
       </div>
 
       <div class="card">
@@ -836,6 +855,10 @@
         <input type="text" id="haat-dcr" placeholder="DCR নং">
       </div>
     </div>
+    <div class="form-group">
+      <label>📅 রিমাইন্ডার (ঐচ্ছিক)</label>
+      <input type="datetime-local" id="haat-reminder" placeholder="না দিলে রিমাইন্ডার থাকবে না">
+    </div>
     <div class="modal-actions">
       <button class="btn-ghost" onclick="closeModal('haat-modal')">বাতিল</button>
       <button class="btn-sm" onclick="saveHaat()">সংরক্ষণ করো</button>
@@ -884,6 +907,10 @@
         <label>DCR নাম্বার (থাকলে)</label>
         <input type="text" id="vp-dcr" placeholder="DCR নং">
       </div>
+    </div>
+    <div class="form-group">
+      <label>📅 রিমাইন্ডার (ঐচ্ছিক)</label>
+      <input type="datetime-local" id="vp-reminder" placeholder="না দিলে রিমাইন্ডার থাকবে না">
     </div>
     <div class="modal-actions">
       <button class="btn-ghost" onclick="closeModal('vp-modal')">বাতিল</button>
@@ -938,6 +965,10 @@
       <label>মন্তব্য</label>
       <textarea id="chithi-comment" placeholder="মন্তব্য লিখুন..."></textarea>
     </div>
+    <div class="form-group">
+      <label>📅 রিমাইন্ডার (ঐচ্ছিক)</label>
+      <input type="datetime-local" id="chithi-reminder" placeholder="না দিলে রিমাইন্ডার থাকবে না">
+    </div>
     <div class="modal-actions">
       <button class="btn-ghost" onclick="closeModal('chithi-modal')">বাতিল</button>
       <button class="btn-sm" onclick="saveChithi()">সংরক্ষণ করো</button>
@@ -969,6 +1000,10 @@
       <label>তারিখ</label>
       <input type="date" id="kaj-date">
     </div>
+    <div class="form-group">
+      <label>📅 রিমাইন্ডার (ঐচ্ছিক)</label>
+      <input type="datetime-local" id="kaj-reminder" placeholder="না দিলে রিমাইন্ডার থাকবে না">
+    </div>
     <div class="modal-actions">
       <button class="btn-ghost" onclick="closeModal('kaj-modal')">বাতিল</button>
       <button class="btn-sm" onclick="saveKaj()">সংরক্ষণ করো</button>
@@ -991,6 +1026,10 @@
     <div class="form-group">
       <label>বিস্তারিত</label>
       <textarea id="note-body" placeholder="লিখুন..." style="min-height:140px"></textarea>
+    </div>
+    <div class="form-group">
+      <label>📅 রিমাইন্ডার (ঐচ্ছিক)</label>
+      <input type="datetime-local" id="note-reminder" placeholder="না দিলে রিমাইন্ডার থাকবে না">
     </div>
     <div class="modal-actions">
       <button class="btn-ghost" onclick="closeModal('note-modal')">বাতিল</button>
@@ -1064,6 +1103,10 @@
       <label>কাজের অগ্রগতি</label>
       <textarea id="paid-progress" placeholder="কাজ কতদূর এগিয়েছে লিখুন..." style="min-height:60px"></textarea>
     </div>
+    <div class="form-group">
+      <label>📅 রিমাইন্ডার (ঐচ্ছিক)</label>
+      <input type="datetime-local" id="paid-reminder" placeholder="না দিলে রিমাইন্ডার থাকবে না">
+    </div>
     <div class="modal-actions">
       <button class="btn-ghost" onclick="closeModal('paid-modal')">বাতিল</button>
       <button class="btn-sm" onclick="savePaid()">সংরক্ষণ করো</button>
@@ -1100,6 +1143,10 @@
     <div class="form-group">
       <label>নোট</label>
       <textarea id="mutation-note" placeholder="বিস্তারিত নোট লিখুন..."></textarea>
+    </div>
+    <div class="form-group">
+      <label>📅 রিমাইন্ডার (ঐচ্ছিক)</label>
+      <input type="datetime-local" id="mutation-reminder" placeholder="না দিলে রিমাইন্ডার থাকবে না">
     </div>
     <div class="modal-actions">
       <button class="btn-ghost" onclick="closeModal('mutation-modal')">বাতিল</button>
