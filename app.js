@@ -2031,60 +2031,91 @@ function renderNewsList(items) {
   const container = document.getElementById('news-list-container');
   if (!container) return;
 
-  if (!items || items.length === 0) {
-    container.innerHTML = `<div class="news-loading">
-      <div style="font-size:32px;margin-bottom:10px">📭</div>
-      <div>এই ক্যাটাগরিতে কোনো সংবাদ নেই</div>
-    </div>`;
-    return;
-  }
-
   const filtered = currentNewsFilter === 'all'
     ? items
     : items.filter(n => n.category === currentNewsFilter);
 
-  if (filtered.length === 0) {
+  if (!filtered || filtered.length === 0) {
     container.innerHTML = `<div class="news-loading">
-      <div style="font-size:32px;margin-bottom:10px">🔍</div>
+      <div style="font-size:36px;margin-bottom:10px">🔍</div>
       <div>এই বিভাগে কোনো সংবাদ পাওয়া যায়নি</div>
     </div>`;
     return;
   }
 
   const badgeMap = {
-    land: { cls: 'land', label: 'ভূমি মন্ত্রণালয়' },
-    dc: { cls: 'dc', label: 'যশোর DC' },
-    comm: { cls: 'comm', label: 'খুলনা কমিশনার' },
-    job: { cls: 'job', label: 'চাকরি' },
-    general: { cls: 'general', label: 'সাধারণ' }
+    land:    { cls: 'land',    label: '🏛️ ভূমি মন্ত্রণালয়' },
+    dc:      { cls: 'dc',      label: '🏢 যশোর DC' },
+    comm:    { cls: 'comm',    label: '🟣 খুলনা কমিশনার' },
+    job:     { cls: 'job',     label: '💼 চাকরি' },
+    general: { cls: 'general', label: '📋 সাধারণ' }
   };
 
-  container.innerHTML = filtered.map(item => {
+  container.innerHTML = filtered.map((item, idx) => {
     const b = badgeMap[item.category] || badgeMap.general;
+
     const dateStr = item.date instanceof Date
       ? item.date.toLocaleDateString('bn-BD', { day: 'numeric', month: 'long', year: 'numeric' })
-      : item.date;
-    const isImportant = item.important || IMPORTANT_KEYWORDS.some(kw => item.title.includes(kw) || (item.summary||'').includes(kw));
+      : (item.date || '');
 
-    return `<div class="news-card cat-${item.category}" id="ncard-${item.id}">
-      <div class="news-card-top">
-        <div class="news-card-title">
-          <a href="${item.url}" target="_blank" rel="noopener">${item.title}</a>
-          ${item.isNew ? '<span class="news-new-tag">নতুন</span>' : ''}
-          ${isImportant ? '<span style="display:inline-block;margin-left:6px;background:rgba(248,113,113,0.13);color:var(--red);border-radius:8px;padding:1px 8px;font-size:10px;font-weight:700;vertical-align:middle">⚡ গুরুত্বপূর্ণ</span>' : ''}
+    const isImportant = item.important
+      || IMPORTANT_KEYWORDS.some(kw => (item.title||'').includes(kw) || (item.summary||'').includes(kw));
+
+    const detailId = 'nd-' + idx;
+    const btnId    = 'nb-' + idx;
+
+    return `
+    <div class="news-card cat-${item.category}">
+      <div class="news-card-body">
+
+        <!-- badge + তারিখ -->
+        <div class="news-card-top">
+          <span class="news-badge ${b.cls}">${b.label}</span>
+          ${item.isNew ? '<span class="news-badge-new">🆕 নতুন</span>' : ''}
+          ${isImportant ? '<span class="news-badge-imp">⚡ গুরুত্বপূর্ণ</span>' : ''}
+          <span class="news-date">📅 ${dateStr}</span>
         </div>
-        <span class="news-badge ${b.cls}">${b.label}</span>
+
+        <!-- headline — ক্লিক করলে বিস্তারিত টগল হবে -->
+        <div class="news-headline" onclick="toggleNewsDetail('${detailId}','${btnId}')">
+          ${item.title}
+        </div>
+
+        <!-- বিস্তারিত — লুকানো থাকে -->
+        <div class="news-detail" id="${detailId}">
+          ${item.summary || 'বিস্তারিত তথ্য মূল ওয়েবসাইটে পাবেন।'}
+          <div style="margin-top:10px;font-size:12px;color:var(--muted)">
+            📌 সূত্র: <b style="color:var(--text)">${item.source || ''}</b>
+          </div>
+        </div>
+
+        <!-- action বাটন -->
+        <div class="news-card-actions">
+          <button class="news-detail-btn" id="${btnId}" onclick="toggleNewsDetail('${detailId}','${btnId}')">
+            <span>📖</span> <span>বিস্তারিত দেখুন</span>
+          </button>
+          <a class="news-source-link" href="${item.url}" target="_blank" rel="noopener">
+            🔗 মূল সংবাদ পড়ুন ↗
+          </a>
+        </div>
+
       </div>
-      ${item.summary ? `<div class="news-card-summary">${item.summary}</div>` : ''}
-      <div class="news-card-meta">
-        <span>📌 ${item.source}</span>
-        <span>📅 ${dateStr}</span>
-      </div>
-      <a class="news-card-link" href="${item.url}" target="_blank" rel="noopener">
-        🔗 মূল সংবাদ পড়ুন ↗
-      </a>
     </div>`;
   }).join('');
+}
+
+// বিস্তারিত toggle করার ফাংশন
+function toggleNewsDetail(detailId, btnId) {
+  const detail = document.getElementById(detailId);
+  const btn    = document.getElementById(btnId);
+  if (!detail) return;
+  const isOpen = detail.classList.contains('open');
+  detail.classList.toggle('open', !isOpen);
+  if (btn) {
+    btn.classList.toggle('active', !isOpen);
+    const span = btn.querySelector('span:last-child');
+    if (span) span.textContent = isOpen ? 'বিস্তারিত দেখুন' : 'বিস্তারিত লুকান';
+  }
 }
 
 // ────────────────────────────────────
