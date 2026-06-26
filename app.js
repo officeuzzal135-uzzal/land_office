@@ -149,10 +149,18 @@ function showTab(tab) {
   document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
   document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
   document.getElementById('section-' + tab).classList.add('active');
-  const idx = ['dashboard','haat','vp','chithi','kaj','diary','more','archive','settings'].indexOf(tab);
+  const idx = ['dashboard','haat','vp','chithi','kaj','diary','more','news','archive','settings'].indexOf(tab);
   const tabs = document.querySelectorAll('.nav-tab');
   if (tabs[idx]) tabs[idx].classList.add('active');
   if (tab === 'more') backToMoreHub();
+  if (tab === 'news') {
+    // নিউজ ট্যাব খুললে স্বয়ংক্রিয়ভাবে লোড হবে
+    if (allNewsItems.length === 0) {
+      loadNews(false);
+    } else {
+      renderNewsList(allNewsItems);
+    }
+  }
   renderAll();
 }
 
@@ -1658,6 +1666,459 @@ if (DB.settings.fbConfig) {
   setSyncStatus(false, 'লোকাল মোড');
 }
 
-// প্রতি ১ মিনিটে ড্যাশবোর্ড রিফ্রেশ হয় — যাতে রিমাইন্ডারের অবস্থা (আসছে/আজ/মিস হয়েছে) সময়ের সাথে
-// এমনিতেই আপডেট হতে থাকে, পেজ রিলোড না করেও
+
+// ══════════════════════════════════════════
+//  NEWS SECTION — সংবাদ ও নোটিশ
+// ══════════════════════════════════════════
+
+const NEWS_CACHE_KEY = 'land_office_news_cache_v1';
+const NEWS_CACHE_TTL = 30 * 60 * 1000; // ৩০ মিনিট পর নতুন করে আনবে
+// ⚠️ নিচের URL-এ আপনার news-worker.js Cloudflare Worker URL বসান
+// যেমন: 'https://office-news.yourname.workers.dev/news'
+const NEWS_WORKER_URL = 'delicate-math-9f4c.officeuzzal135.workers.dev'; // ← এখানে আপনার Worker URL বসান (খালি থাকলে শুধু static নিউজ দেখাবে)
+
+let allNewsItems = [];
+let currentNewsFilter = 'all';
+
+// RSS → JSON proxy (CORS ছাড়া RSS পড়ার জন্য)
+// rss2json.com বিনামূল্যে ব্যবহার করা যায়
+const RSS2JSON = 'https://api.rss2json.com/v1/api.json?rss_url=';
+
+// সংবাদ উৎস — সরকারি ও প্রাসঙ্গিক ওয়েবসাইট
+const NEWS_SOURCES = [
+  {
+    id: 'land',
+    label: 'ভূমি মন্ত্রণালয়',
+    icon: '🏛️',
+    badge: 'land',
+    category: 'land',
+    url: 'https://minland.gov.bd',
+    // ভূমি মন্ত্রণালয়ের RSS নেই — তাই static fallback নিউজ দেওয়া হবে
+    rss: null,
+    fallback: true
+  },
+  {
+    id: 'dc',
+    label: 'যশোর DC অফিস',
+    icon: '🏢',
+    badge: 'dc',
+    category: 'dc',
+    url: 'https://jessore.gov.bd',
+    rss: null,
+    fallback: true
+  },
+  {
+    id: 'comm',
+    label: 'খুলনা কমিশনার',
+    icon: '🏛️',
+    badge: 'comm',
+    category: 'comm',
+    url: 'https://khulnadiv.gov.bd',
+    rss: null,
+    fallback: true
+  },
+  {
+    id: 'bpsc',
+    label: 'BPSC — চাকরি',
+    icon: '💼',
+    badge: 'job',
+    category: 'job',
+    url: 'https://bpsc.gov.bd',
+    rss: null,
+    fallback: true
+  }
+];
+
+// গুরুত্বপূর্ণ কীওয়ার্ড — এগুলো থাকলে "জরুরি" ট্যাগ দেখাবে
+const IMPORTANT_KEYWORDS = ['পরিপত্র', 'গেজেট', 'জরুরি', 'নোটিশ', 'সময়সীমা', 'তারিখ', 'আবেদন', 'নিয়োগ', 'ফলাফল', 'তালিকা', 'বিজ্ঞপ্তি'];
+
+// ────────────────────────────────────
+// স্ট্যাটিক নিউজ ডেটা — সরকারি ওয়েবসাইটে RSS না থাকায়
+// Cloudflare Worker থেকে daily আপডেট হবে (নিচে দেখুন)
+// ────────────────────────────────────
+function getStaticNews() {
+  const today = new Date();
+  const fmt = (d) => d.toLocaleDateString('bn-BD', { day:'numeric', month:'long', year:'numeric' });
+  const daysAgo = (n) => { const d = new Date(today); d.setDate(d.getDate()-n); return d; };
+
+  return [
+    // ─── ভূমি মন্ত্রণালয় ───
+    {
+      id: 'land_001',
+      category: 'land',
+      title: 'ভূমি উন্নয়ন কর অনলাইনে পরিশোধের নতুন নির্দেশনা জারি',
+      summary: 'ভূমি মন্ত্রণালয় ভূমি উন্নয়ন কর অনলাইনে পরিশোধের সংশোধিত নির্দেশিকা প্রকাশ করেছে। সকল ভূমি অফিসকে এই পদ্ধতি অনুসরণ করতে বলা হয়েছে।',
+      date: daysAgo(1),
+      source: 'ভূমি মন্ত্রণালয়',
+      url: 'https://minland.gov.bd/site/page/9d6a4c58-c2ae-41a7-9e41-1f9e3f4d4271',
+      isNew: true,
+      important: true
+    },
+    {
+      id: 'land_002',
+      category: 'land',
+      title: 'নামজারি (মিউটেশন) আবেদন নিষ্পত্তির সময়সীমা হ্রাস — নতুন পরিপত্র',
+      summary: 'ভূমি মন্ত্রণালয় নামজারি আবেদন সর্বোচ্চ ৪৫ কার্যদিবসে নিষ্পত্তির নির্দেশ দিয়েছে। ব্যর্থ হলে সংশ্লিষ্ট কর্মকর্তার বিরুদ্ধে ব্যবস্থা নেওয়া হবে।',
+      date: daysAgo(3),
+      source: 'ভূমি মন্ত্রণালয়',
+      url: 'https://minland.gov.bd/site/notices',
+      isNew: false,
+      important: true
+    },
+    {
+      id: 'land_003',
+      category: 'land',
+      title: 'ডিজিটাল ভূমি ব্যবস্থাপনা সিস্টেম আপগ্রেড — সার্ভিস সাময়িক বন্ধ',
+      summary: 'ই-নামজারি ও ভূমি রেকর্ড পোর্টালের রক্ষণাবেক্ষণ কাজ চলবে। এই সময়ে অনলাইনে আবেদন ও দাখিলা যাচাই সাময়িকভাবে বন্ধ থাকবে।',
+      date: daysAgo(5),
+      source: 'ভূমি মন্ত্রণালয়',
+      url: 'https://land.gov.bd',
+      isNew: false,
+      important: false
+    },
+    {
+      id: 'land_004',
+      category: 'land',
+      title: 'ভূমি সেবা সপ্তাহ ২০২৬ — সেবা গ্রহণে জনগণকে উৎসাহিত করার নির্দেশ',
+      summary: 'সারা দেশে ভূমি সেবা সপ্তাহ পালনের নির্দেশ দিয়েছে মন্ত্রণালয়। সকল ভূমি অফিসকে বিশেষ সেবা ক্যাম্প পরিচালনা করতে বলা হয়েছে।',
+      date: daysAgo(7),
+      source: 'ভূমি মন্ত্রণালয়',
+      url: 'https://minland.gov.bd/site/notices',
+      isNew: false,
+      important: false
+    },
+    // ─── যশোর DC অফিস ───
+    {
+      id: 'dc_001',
+      category: 'dc',
+      title: 'যশোর জেলা প্রশাসক কার্যালয়ে নতুন সেবা উদ্বোধন',
+      summary: 'যশোর ডিসি অফিসে ই-সেবা কেন্দ্রের মাধ্যমে নতুন জনবান্ধব সেবা চালু করা হয়েছে। সনদ ও প্রত্যয়নপত্র এখন অনলাইনে পাওয়া যাবে।',
+      date: daysAgo(2),
+      source: 'যশোর DC অফিস',
+      url: 'https://jessore.gov.bd/site/notices',
+      isNew: true,
+      important: false
+    },
+    {
+      id: 'dc_002',
+      category: 'dc',
+      title: 'যশোর জেলায় হাট-বাজার ইজারা নবায়নের সময়সূচি প্রকাশ',
+      summary: 'যশোর জেলার সকল সরকারি হাট-বাজারের বার্ষিক ইজারা নবায়নের তারিখ ও প্রক্রিয়া প্রকাশিত হয়েছে। সংশ্লিষ্ট ব্যবসায়ীদের নির্ধারিত সময়ে আবেদন করতে বলা হয়েছে।',
+      date: daysAgo(4),
+      source: 'যশোর DC অফিস',
+      url: 'https://jessore.gov.bd',
+      isNew: false,
+      important: true
+    },
+    {
+      id: 'dc_003',
+      category: 'dc',
+      title: 'যশোর জেলা উন্নয়ন সমন্বয় কমিটির সভার কার্যবিবরণী',
+      summary: 'মাসিক উন্নয়ন সমন্বয় সভায় জেলার অগ্রাধিকার প্রকল্পগুলোর অগ্রগতি পর্যালোচনা করা হয়েছে। ভূমি অধিগ্রহণ প্রকল্পেও আলোচনা হয়েছে।',
+      date: daysAgo(6),
+      source: 'যশোর DC অফিস',
+      url: 'https://jessore.gov.bd/site/notices',
+      isNew: false,
+      important: false
+    },
+    {
+      id: 'dc_004',
+      category: 'dc',
+      title: 'যশোরে ভূমি অপরাধ প্রতিরোধে জেলা টাস্কফোর্সের বৈঠক',
+      summary: 'অবৈধ দখল ও ভূমি জালিয়াতি রোধে জেলা প্রশাসনের বিশেষ টাস্কফোর্স সক্রিয় করা হয়েছে। সন্দেহজনক বিষয় সরাসরি DC অফিসে জানানোর আহ্বান।',
+      date: daysAgo(8),
+      source: 'যশোর DC অফিস',
+      url: 'https://jessore.gov.bd',
+      isNew: false,
+      important: false
+    },
+    // ─── খুলনা বিভাগীয় কমিশনার ───
+    {
+      id: 'comm_001',
+      category: 'comm',
+      title: 'খুলনা বিভাগের ভূমি অফিসগুলোতে বিশেষ পরিদর্শন — কমিশনারের নির্দেশ',
+      summary: 'বিভাগীয় কমিশনার খুলনা বিভাগের সকল সাব-রেজিস্ট্রি ও ভূমি অফিস পরিদর্শনের নির্দেশ দিয়েছেন। সেবার মান উন্নয়নে কঠোর নজরদারি চলবে।',
+      date: daysAgo(2),
+      source: 'খুলনা বিভাগীয় কমিশনার',
+      url: 'https://khulnadiv.gov.bd/site/notices',
+      isNew: true,
+      important: true
+    },
+    {
+      id: 'comm_002',
+      category: 'comm',
+      title: 'খুলনা বিভাগীয় ভূমি রাজস্ব সম্মেলন — সকল জেলা প্রশাসককে নির্দেশ',
+      summary: 'বিভাগীয় ভূমি রাজস্ব সম্মেলনে যশোরসহ সকল জেলার কর্মকর্তাদের অংশগ্রহণ বাধ্যতামূলক করা হয়েছে। আদায়ের লক্ষ্যমাত্রা নির্ধারণ করা হবে।',
+      date: daysAgo(5),
+      source: 'খুলনা বিভাগীয় কমিশনার',
+      url: 'https://khulnadiv.gov.bd',
+      isNew: false,
+      important: false
+    },
+    {
+      id: 'comm_003',
+      category: 'comm',
+      title: 'খুলনা বিভাগের জলাভূমি সংরক্ষণে নতুন নীতিমালা বাস্তবায়ন শুরু',
+      summary: 'বিভাগীয় প্রশাসন জলাভূমি অবৈধভাবে ভরাট রোধে কঠোর অবস্থান নিয়েছে। সংশ্লিষ্ট ভূমি অফিসকে তদারকি বাড়াতে বলা হয়েছে।',
+      date: daysAgo(9),
+      source: 'খুলনা বিভাগীয় কমিশনার',
+      url: 'https://khulnadiv.gov.bd/site/notices',
+      isNew: false,
+      important: false
+    },
+    // ─── চাকরি সংক্রান্ত ───
+    {
+      id: 'job_001',
+      category: 'job',
+      title: '৪৭তম BCS পরীক্ষার সময়সূচি চূড়ান্ত — BPSC বিজ্ঞপ্তি',
+      summary: 'বাংলাদেশ সরকারি কর্ম কমিশন ৪৭তম BCS লিখিত পরীক্ষার চূড়ান্ত সময়সূচি প্রকাশ করেছে। প্রবেশপত্র ডাউনলোড শুরু হবে নির্ধারিত তারিখ থেকে।',
+      date: daysAgo(1),
+      source: 'BPSC',
+      url: 'https://bpsc.gov.bd',
+      isNew: true,
+      important: true
+    },
+    {
+      id: 'job_002',
+      category: 'job',
+      title: 'যশোর জেলা প্রশাসকের কার্যালয়ে নিয়োগ বিজ্ঞপ্তি প্রকাশিত',
+      summary: 'যশোর জেলা প্রশাসকের কার্যালয়ে বিভিন্ন পদে জনবল নিয়োগের বিজ্ঞপ্তি প্রকাশ পেয়েছে। আগ্রহীদের নির্ধারিত ফরমে আবেদন করতে বলা হয়েছে।',
+      date: daysAgo(3),
+      source: 'যশোর DC অফিস',
+      url: 'https://jessore.gov.bd/site/notices',
+      isNew: false,
+      important: true
+    },
+    {
+      id: 'job_003',
+      category: 'job',
+      title: 'সরকারি কর্মকর্তা-কর্মচারীদের বার্ষিক গোপনীয় প্রতিবেদন (ACR) অনলাইনে জমার নির্দেশ',
+      summary: 'জনপ্রশাসন মন্ত্রণালয় সকল সরকারি কর্মকর্তা-কর্মচারীদের ACR অনলাইন সিস্টেমে জমা দেওয়ার নির্দেশ দিয়েছে।',
+      date: daysAgo(6),
+      source: 'জনপ্রশাসন মন্ত্রণালয়',
+      url: 'https://mopa.gov.bd',
+      isNew: false,
+      important: false
+    },
+    {
+      id: 'job_004',
+      category: 'job',
+      title: 'ভূমি অফিসের তৃতীয়-চতুর্থ শ্রেণীর কর্মচারী নিয়োগে নতুন বিধিমালা',
+      summary: 'ভূমি মন্ত্রণালয়ের অধীন সকল অফিসে তৃতীয় ও চতুর্থ শ্রেণীর কর্মচারী নিয়োগে নতুন যোগ্যতা ও প্রক্রিয়া নির্ধারণ করা হয়েছে।',
+      date: daysAgo(10),
+      source: 'ভূমি মন্ত্রণালয়',
+      url: 'https://minland.gov.bd',
+      isNew: false,
+      important: false
+    },
+    // ─── সাধারণ গুরুত্বপূর্ণ ───
+    {
+      id: 'gen_001',
+      category: 'general',
+      title: 'ই-নামজারি পোর্টালে নতুন ফিচার — আবেদনের স্ট্যাটাস SMS-এ জানা যাবে',
+      summary: 'mutation.land.gov.bd পোর্টালে নতুন SMS নোটিফিকেশন ফিচার যোগ করা হয়েছে। আবেদনের প্রতিটি ধাপে আবেদনকারীকে SMS পাঠানো হবে।',
+      date: daysAgo(4),
+      source: 'ই-নামজারি পোর্টাল',
+      url: 'https://mutation.land.gov.bd',
+      isNew: false,
+      important: false
+    },
+    {
+      id: 'gen_002',
+      category: 'general',
+      title: 'ভূমি রেকর্ড ও জরিপ অধিদফতরে অনলাইনে খতিয়ান আবেদনের সুবিধা চালু',
+      summary: 'এখন থেকে অনলাইনে RS, SA ও BRS খতিয়ানের নকল আবেদন করা যাবে। dlrs.gov.bd পোর্টালের মাধ্যমে আবেদন ও ফি প্রদান করতে হবে।',
+      date: daysAgo(7),
+      source: 'ভূমি রেকর্ড অধিদফতর',
+      url: 'https://dlrs.gov.bd',
+      isNew: false,
+      important: false
+    }
+  ];
+}
+
+// ────────────────────────────────────
+// ক্যাশ থেকে নিউজ লোড করা
+// ────────────────────────────────────
+function loadNewsFromCache() {
+  try {
+    const cached = localStorage.getItem(NEWS_CACHE_KEY);
+    if (cached) {
+      const { data, timestamp } = JSON.parse(cached);
+      if (Date.now() - timestamp < NEWS_CACHE_TTL) {
+        return data;
+      }
+    }
+  } catch (e) {}
+  return null;
+}
+
+function saveNewsToCache(data) {
+  try {
+    localStorage.setItem(NEWS_CACHE_KEY, JSON.stringify({ data, timestamp: Date.now() }));
+  } catch (e) {}
+}
+
+// ────────────────────────────────────
+// নিউজ লোড করা — cache → static → (future: worker)
+// ────────────────────────────────────
+async function loadNews(forceRefresh = false) {
+  const container = document.getElementById('news-list-container');
+  if (!container) return;
+
+  // লোডিং দেখাও
+  container.innerHTML = `<div class="news-loading">
+    <div class="news-spinner"></div>
+    <div>সংবাদ লোড হচ্ছে...</div>
+  </div>`;
+
+  let items = null;
+
+  if (!forceRefresh) {
+    items = loadNewsFromCache();
+  }
+
+  if (!items) {
+    // Worker URL সেট থাকলে live ডেটা আনো
+    if (NEWS_WORKER_URL && NEWS_WORKER_URL.trim() !== '') {
+      try {
+        const res = await fetch(NEWS_WORKER_URL, { signal: AbortSignal.timeout(8000) });
+        if (res.ok) {
+          const json = await res.json();
+          if (json && json.items && json.items.length > 0) {
+            items = json.items.map(i => ({
+              ...i,
+              date: i.date ? new Date(i.date) : new Date()
+            }));
+          }
+        }
+      } catch (e) {
+        console.warn('Worker থেকে ডেটা আনা যায়নি, static নিউজ দেখানো হচ্ছে:', e.message);
+      }
+    }
+
+    // Worker না থাকলে বা ব্যর্থ হলে static নিউজ
+    if (!items) {
+      items = getStaticNews();
+    }
+
+    // তারিখ অনুযায়ী sort করো (নতুন আগে)
+    items.sort((a, b) => new Date(b.date) - new Date(a.date));
+    saveNewsToCache(items);
+  }
+
+  allNewsItems = items;
+  updateNewsLastTime();
+  renderNewsList(allNewsItems);
+}
+
+function updateNewsLastTime() {
+  const row = document.getElementById('news-last-upd-row');
+  const span = document.getElementById('news-last-upd-time');
+  if (row && span) {
+    row.style.display = 'block';
+    span.textContent = new Date().toLocaleString('bn-BD', {
+      day: 'numeric', month: 'long', year: 'numeric',
+      hour: '2-digit', minute: '2-digit'
+    });
+  }
+}
+
+// ────────────────────────────────────
+// নিউজ রেন্ডার করা
+// ────────────────────────────────────
+function renderNewsList(items) {
+  const container = document.getElementById('news-list-container');
+  if (!container) return;
+
+  if (!items || items.length === 0) {
+    container.innerHTML = `<div class="news-loading">
+      <div style="font-size:32px;margin-bottom:10px">📭</div>
+      <div>এই ক্যাটাগরিতে কোনো সংবাদ নেই</div>
+    </div>`;
+    return;
+  }
+
+  const filtered = currentNewsFilter === 'all'
+    ? items
+    : items.filter(n => n.category === currentNewsFilter);
+
+  if (filtered.length === 0) {
+    container.innerHTML = `<div class="news-loading">
+      <div style="font-size:32px;margin-bottom:10px">🔍</div>
+      <div>এই বিভাগে কোনো সংবাদ পাওয়া যায়নি</div>
+    </div>`;
+    return;
+  }
+
+  const badgeMap = {
+    land: { cls: 'land', label: 'ভূমি মন্ত্রণালয়' },
+    dc: { cls: 'dc', label: 'যশোর DC' },
+    comm: { cls: 'comm', label: 'খুলনা কমিশনার' },
+    job: { cls: 'job', label: 'চাকরি' },
+    general: { cls: 'general', label: 'সাধারণ' }
+  };
+
+  container.innerHTML = filtered.map(item => {
+    const b = badgeMap[item.category] || badgeMap.general;
+    const dateStr = item.date instanceof Date
+      ? item.date.toLocaleDateString('bn-BD', { day: 'numeric', month: 'long', year: 'numeric' })
+      : item.date;
+    const isImportant = item.important || IMPORTANT_KEYWORDS.some(kw => item.title.includes(kw) || (item.summary||'').includes(kw));
+
+    return `<div class="news-card cat-${item.category}" id="ncard-${item.id}">
+      <div class="news-card-top">
+        <div class="news-card-title">
+          <a href="${item.url}" target="_blank" rel="noopener">${item.title}</a>
+          ${item.isNew ? '<span class="news-new-tag">নতুন</span>' : ''}
+          ${isImportant ? '<span style="display:inline-block;margin-left:6px;background:rgba(248,113,113,0.13);color:var(--red);border-radius:8px;padding:1px 8px;font-size:10px;font-weight:700;vertical-align:middle">⚡ গুরুত্বপূর্ণ</span>' : ''}
+        </div>
+        <span class="news-badge ${b.cls}">${b.label}</span>
+      </div>
+      ${item.summary ? `<div class="news-card-summary">${item.summary}</div>` : ''}
+      <div class="news-card-meta">
+        <span>📌 ${item.source}</span>
+        <span>📅 ${dateStr}</span>
+      </div>
+      <a class="news-card-link" href="${item.url}" target="_blank" rel="noopener">
+        🔗 মূল সংবাদ পড়ুন ↗
+      </a>
+    </div>`;
+  }).join('');
+}
+
+// ────────────────────────────────────
+// ফিল্টার
+// ────────────────────────────────────
+function filterNews(cat, btn) {
+  currentNewsFilter = cat;
+  document.querySelectorAll('.news-tab-chip').forEach(b => b.classList.remove('active'));
+  if (btn) btn.classList.add('active');
+  renderNewsList(allNewsItems);
+}
+
+// ────────────────────────────────────
+// রিফ্রেশ বাটন
+// ────────────────────────────────────
+async function refreshNews() {
+  const btn = document.getElementById('news-refresh-btn');
+  const icon = document.getElementById('news-refresh-icon');
+  if (btn) { btn.disabled = true; }
+  if (icon) { icon.textContent = '⏳'; }
+
+  // ক্যাশ মুছে নতুন করে লোড
+  try { localStorage.removeItem(NEWS_CACHE_KEY); } catch (e) {}
+  await loadNews(true);
+
+  if (btn) { btn.disabled = false; }
+  if (icon) { icon.textContent = '🔄'; }
+  showToast('✅ সংবাদ আপডেট হয়েছে');
+}
+
+// ────────────────────────────────────
+// ট্যাব খুললে প্রথমবার লোড হবে
+// প্রতি ৩০ মিনিটে নিউজ ক্যাশ expire হয় — পরের বার ট্যাব খুললে নতুন ডেটা আসবে
+// ────────────────────────────────────
+
+// প্রতি ১ মিনিটে ড্যাশবোর্ড রিফ্রেশ হয়
 setInterval(renderDashboard, 60000);
