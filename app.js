@@ -1671,72 +1671,48 @@ if (DB.settings.fbConfig) {
 //  NEWS SECTION — সংবাদ ও নোটিশ
 // ══════════════════════════════════════════
 
-const NEWS_CACHE_KEY = 'land_office_news_cache_v1';
-const NEWS_CACHE_TTL = 30 * 60 * 1000; // ৩০ মিনিট পর নতুন করে আনবে
-// ⚠️ নিচের URL-এ আপনার news-worker.js Cloudflare Worker URL বসান
-// যেমন: 'https://office-news.yourname.workers.dev/news'
-const NEWS_WORKER_URL = 'delicate-math-9f4c.officeuzzal135.workers.dev'; // ← এখানে আপনার Worker URL বসান (খালি থাকলে শুধু static নিউজ দেখাবে)
+const NEWS_CACHE_KEY = 'land_office_news_cache_v2';
+// দিনে ১ বার (সকালে Worker নিজেই Cron দিয়ে আপডেট করে) যথেষ্ট —
+// তাই অ্যাপ নিজে থেকে ৬ ঘণ্টার বেশি পুরনো cache থাকলেই নতুন করে আনবে
+const NEWS_CACHE_TTL = 6 * 60 * 60 * 1000; // ৬ ঘণ্টা
+// ⚠️ Worker এর বেস URL (পাথ ছাড়া) — নিচে /news ও /refresh যুক্ত হবে automatic ভাবে
+// আগে এখানে https:// ছিল না বলেই Worker থেকে কখনো real ডেটা আসছিল না — এটাই ঠিক করা হলো
+const NEWS_WORKER_BASE = 'https://delicate-math-9f4c.officeuzzal135.workers.dev';
+const NEWS_WORKER_URL = NEWS_WORKER_BASE + '/news';
+const NEWS_REFRESH_URL = NEWS_WORKER_BASE + '/refresh';
 
 let allNewsItems = [];
 let currentNewsFilter = 'all';
-
-// RSS → JSON proxy (CORS ছাড়া RSS পড়ার জন্য)
-// rss2json.com বিনামূল্যে ব্যবহার করা যায়
-const RSS2JSON = 'https://api.rss2json.com/v1/api.json?rss_url=';
+let newsUsingFallback = false; // true হলে বোঝাবে Worker থেকে ডেটা আনা যায়নি, sample/static নিউজ দেখানো হচ্ছে
 
 // সংবাদ উৎস — সরকারি ও প্রাসঙ্গিক ওয়েবসাইট
+// (Worker (news-worker.js) এর SOURCES লিস্টের সাথে এই তালিকা মিলিয়ে রাখা হয়েছে)
 const NEWS_SOURCES = [
-  {
-    id: 'land',
-    label: 'ভূমি মন্ত্রণালয়',
-    icon: '🏛️',
-    badge: 'land',
-    category: 'land',
-    url: 'https://minland.gov.bd',
-    // ভূমি মন্ত্রণালয়ের RSS নেই — তাই static fallback নিউজ দেওয়া হবে
-    rss: null,
-    fallback: true
-  },
-  {
-    id: 'dc',
-    label: 'যশোর DC অফিস',
-    icon: '🏢',
-    badge: 'dc',
-    category: 'dc',
-    url: 'https://jessore.gov.bd',
-    rss: null,
-    fallback: true
-  },
-  {
-    id: 'comm',
-    label: 'খুলনা কমিশনার',
-    icon: '🏛️',
-    badge: 'comm',
-    category: 'comm',
-    url: 'https://khulnadiv.gov.bd',
-    rss: null,
-    fallback: true
-  },
-  {
-    id: 'bpsc',
-    label: 'BPSC — চাকরি',
-    icon: '💼',
-    badge: 'job',
-    category: 'job',
-    url: 'https://bpsc.gov.bd',
-    rss: null,
-    fallback: true
-  }
+  { id: 'land', label: 'ভূমি মন্ত্রণালয়', icon: '🏛️', badge: 'land', category: 'land', url: 'https://minland.gov.bd' },
+  { id: 'dc', label: 'যশোর DC অফিস', icon: '🏢', badge: 'dc', category: 'dc', url: 'https://jessore.gov.bd' },
+  { id: 'comm', label: 'খুলনা কমিশনার', icon: '🏛️', badge: 'comm', category: 'comm', url: 'https://khulnadiv.gov.bd' },
+  { id: 'bpsc', label: 'BPSC — চাকরি', icon: '💼', badge: 'job', category: 'job', url: 'https://bpsc.gov.bd' },
+  { id: 'land_record', label: 'ভূমি রেকর্ড অধিদফতর', icon: '📄', badge: 'land', category: 'land', url: 'https://dlrs.gov.bd' },
+  { id: 'land_reform_board', label: 'ভূমি সংস্কার বোর্ড', icon: '🏛️', badge: 'land', category: 'land', url: 'https://lrb.gov.bd' },
+  { id: 'gazette', label: 'বাংলাদেশ গেজেট', icon: '📜', badge: 'gazette', category: 'gazette', url: 'https://www.dpp.gov.bd/bgpress/' },
+  { id: 'mopa', label: 'জনপ্রশাসন মন্ত্রণালয়', icon: '📋', badge: 'general', category: 'general', url: 'https://mopa.gov.bd' }
 ];
 
 // গুরুত্বপূর্ণ কীওয়ার্ড — এগুলো থাকলে "জরুরি" ট্যাগ দেখাবে
-const IMPORTANT_KEYWORDS = ['পরিপত্র', 'গেজেট', 'জরুরি', 'নোটিশ', 'সময়সীমা', 'তারিখ', 'আবেদন', 'নিয়োগ', 'ফলাফল', 'তালিকা', 'বিজ্ঞপ্তি'];
+const IMPORTANT_KEYWORDS = ['পরিপত্র', 'গেজেট', 'জরুরি', 'নোটিশ', 'সময়সীমা', 'তারিখ', 'আবেদন', 'নিয়োগ', 'ফলাফল', 'তালিকা', 'বিজ্ঞপ্তি', 'দরপত্র'];
 
 // ────────────────────────────────────
-// স্ট্যাটিক নিউজ ডেটা — সরকারি ওয়েবসাইটে RSS না থাকায়
-// Cloudflare Worker থেকে daily আপডেট হবে (নিচে দেখুন)
+// স্ট্যাটিক/নমুনা নিউজ ডেটা — Worker থেকে real ডেটা আনা সম্ভব না হলে
+// (যেমন ইন্টারনেট সমস্যা বা Worker সাময়িক বন্ধ) এই নমুনা ডেটা দেখানো হয়,
+// যাতে স্ক্রিন খালি না থাকে। এগুলোতে isFallback:true থাকে, যাতে UI তে
+// স্পষ্ট লেখা থাকে এটা নমুনা, real না।
 // ────────────────────────────────────
 function getStaticNews() {
+  const items = getStaticNewsRaw();
+  return items.map(it => ({ ...it, isFallback: true }));
+}
+
+function getStaticNewsRaw() {
   const today = new Date();
   const fmt = (d) => d.toLocaleDateString('bn-BD', { day:'numeric', month:'long', year:'numeric' });
   const daysAgo = (n) => { const d = new Date(today); d.setDate(d.getDate()-n); return d; };
@@ -1960,17 +1936,52 @@ function saveNewsToCache(data) {
 }
 
 // ────────────────────────────────────
-// নিউজ লোড করা — cache → static → (future: worker)
+// লোডিং স্কেলিটন দেখানো (স্পিনারের বদলে আধুনিক shimmer কার্ড)
+// ────────────────────────────────────
+function showNewsSkeleton() {
+  const container = document.getElementById('news-list-container');
+  if (!container) return;
+  let html = '';
+  for (let i = 0; i < 4; i++) {
+    html += `<div class="news-skel">
+      <div class="news-skel-line w40"></div>
+      <div class="news-skel-line w90"></div>
+      <div class="news-skel-line w60"></div>
+    </div>`;
+  }
+  container.innerHTML = html;
+}
+
+// Worker থেকে আসা একটা raw item কে অ্যাপের ব্যবহারের জন্য normalize করা
+function normalizeWorkerItem(i) {
+  // Worker date না পেলে null পাঠায় — তখন আজকের তারিখ বসানো হবে না (ভুল তথ্য এড়াতে),
+  // বরং fetchedAt (Worker কখন আইটেমটা সংগ্রহ করেছে) দেখানো হবে এবং "তারিখ অনুপলব্ধ" চিহ্নিত হবে
+  let dateVal = null;
+  let dateUnknown = false;
+  if (i.date) {
+    const d = new Date(i.date);
+    dateVal = isNaN(d.getTime()) ? null : d;
+  }
+  if (!dateVal) {
+    dateUnknown = true;
+    dateVal = i.fetchedAt ? new Date(i.fetchedAt) : new Date();
+  }
+  return {
+    ...i,
+    date: dateVal,
+    dateUnknown,
+    isFallback: false
+  };
+}
+
+// ────────────────────────────────────
+// নিউজ লোড করা — cache → Worker (real) → static (শুধু ব্যর্থ হলে fallback)
+// forceRefresh true হলে Worker এর /refresh এ কল করে আসলেই নতুন স্ক্র্যাপ ট্রিগার করে,
+// নাহলে /news এ কল করে যা cache এ আছে তাই আনে (দ্রুত)
 // ────────────────────────────────────
 async function loadNews(forceRefresh = false) {
   const container = document.getElementById('news-list-container');
   if (!container) return;
-
-  // লোডিং দেখাও
-  container.innerHTML = `<div class="news-loading">
-    <div class="news-spinner"></div>
-    <div>সংবাদ লোড হচ্ছে...</div>
-  </div>`;
 
   let items = null;
 
@@ -1979,32 +1990,45 @@ async function loadNews(forceRefresh = false) {
   }
 
   if (!items) {
-    // Worker URL সেট থাকলে live ডেটা আনো
-    if (NEWS_WORKER_URL && NEWS_WORKER_URL.trim() !== '') {
-      try {
-        const res = await fetch(NEWS_WORKER_URL, { signal: AbortSignal.timeout(8000) });
-        if (res.ok) {
-          const json = await res.json();
-          if (json && json.items && json.items.length > 0) {
-            items = json.items.map(i => ({
-              ...i,
-              date: i.date ? new Date(i.date) : new Date()
-            }));
+    showNewsSkeleton();
+
+    const targetUrl = forceRefresh ? NEWS_REFRESH_URL : NEWS_WORKER_URL;
+
+    try {
+      const res = await fetch(targetUrl, { signal: AbortSignal.timeout(15000) });
+      if (res.ok) {
+        const json = await res.json();
+        // /refresh এন্ডপয়েন্ট success/count ফেরত দেয়, ডেটা না — তাই refresh এর পর /news আবার কল করে আসল লিস্ট আনি
+        let rawItems = json.items;
+        if (forceRefresh && !rawItems) {
+          const res2 = await fetch(NEWS_WORKER_URL, { signal: AbortSignal.timeout(10000) });
+          if (res2.ok) {
+            const json2 = await res2.json();
+            rawItems = json2.items;
           }
         }
-      } catch (e) {
-        console.warn('Worker থেকে ডেটা আনা যায়নি, static নিউজ দেখানো হচ্ছে:', e.message);
+        if (rawItems && rawItems.length > 0) {
+          items = rawItems.map(normalizeWorkerItem);
+          newsUsingFallback = false;
+        }
       }
+    } catch (e) {
+      console.warn('Worker থেকে ডেটা আনা যায়নি, নমুনা নিউজ দেখানো হচ্ছে:', e.message);
     }
 
-    // Worker না থাকলে বা ব্যর্থ হলে static নিউজ
+    // Worker না থাকলে বা ব্যর্থ হলে static/নমুনা নিউজ
     if (!items) {
-      items = getStaticNews();
+      items = getStaticNews().map(it => ({ ...it, date: new Date(it.date), dateUnknown: false }));
+      newsUsingFallback = true;
     }
 
     // তারিখ অনুযায়ী sort করো (নতুন আগে)
     items.sort((a, b) => new Date(b.date) - new Date(a.date));
     saveNewsToCache(items);
+  } else {
+    // cache থেকে আসা ডেটার date স্ট্রিং কে Date object এ ফিরিয়ে আনা
+    items = items.map(it => ({ ...it, date: new Date(it.date) }));
+    newsUsingFallback = items.some(it => it.isFallback);
   }
 
   allNewsItems = items;
@@ -2035,8 +2059,16 @@ function renderNewsList(items) {
     ? items
     : items.filter(n => n.category === currentNewsFilter);
 
+  // Worker থেকে real ডেটা না পেলে উপরে একটা সতর্কবার্তা দেখানো হবে,
+  // যাতে বোঝা যায় নিচের তালিকা নমুনা, real সংবাদ নয়
+  const fallbackBanner = newsUsingFallback ? `
+    <div style="background:rgba(251,191,36,0.1);border:1px solid rgba(251,191,36,0.35);border-radius:10px;padding:12px 14px;margin-bottom:14px;font-size:13px;color:var(--yellow);line-height:1.6">
+      ⚠️ <b>সরাসরি সরকারি সাইট থেকে এখন সংযোগ করা যাচ্ছে না — নিচে নমুনা তথ্য দেখানো হচ্ছে।</b><br>
+      নিচের লিংকে গিয়ে আসল হালনাগাদ তথ্য দেখুন, অথবা একটু পরে রিফ্রেশ করুন।
+    </div>` : '';
+
   if (!filtered || filtered.length === 0) {
-    container.innerHTML = `<div class="news-loading">
+    container.innerHTML = fallbackBanner + `<div class="news-loading">
       <div style="font-size:36px;margin-bottom:10px">🔍</div>
       <div>এই বিভাগে কোনো সংবাদ পাওয়া যায়নি</div>
     </div>`;
@@ -2044,19 +2076,25 @@ function renderNewsList(items) {
   }
 
   const badgeMap = {
-    land:    { cls: 'land',    label: '🏛️ ভূমি মন্ত্রণালয়' },
+    land:    { cls: 'land',    label: '🏛️ ভূমি' },
     dc:      { cls: 'dc',      label: '🏢 যশোর DC' },
     comm:    { cls: 'comm',    label: '🟣 খুলনা কমিশনার' },
     job:     { cls: 'job',     label: '💼 চাকরি' },
+    gazette: { cls: 'gazette', label: '📜 গেজেট' },
     general: { cls: 'general', label: '📋 সাধারণ' }
   };
 
-  container.innerHTML = filtered.map((item, idx) => {
+  container.innerHTML = fallbackBanner + filtered.map((item, idx) => {
     const b = badgeMap[item.category] || badgeMap.general;
 
     const dateStr = item.date instanceof Date
       ? item.date.toLocaleDateString('bn-BD', { day: 'numeric', month: 'long', year: 'numeric' })
       : (item.date || '');
+
+    // তারিখ অজানা হলে স্পষ্টভাবে বলে দেওয়া হয় (ভুল করে আজকের তারিখ "প্রকাশের তারিখ" বলে চালানো হয় না)
+    const dateLabel = item.dateUnknown
+      ? `সংগৃহীত: ${dateStr}`
+      : dateStr;
 
     const isImportant = item.important
       || IMPORTANT_KEYWORDS.some(kw => (item.title||'').includes(kw) || (item.summary||'').includes(kw));
@@ -2064,8 +2102,13 @@ function renderNewsList(items) {
     const detailId = 'nd-' + idx;
     const btnId    = 'nb-' + idx;
 
+    const hasSummary = item.summary && item.summary.trim().length > 0;
+    const detailHtml = hasSummary
+      ? item.summary
+      : 'এই নোটিশের সংক্ষিপ্ত বিবরণ পাওয়া যায়নি — সম্পূর্ণ বিস্তারিত জানতে নিচের "মূল সংবাদ পড়ুন" বাটনে ক্লিক করুন।';
+
     return `
-    <div class="news-card cat-${item.category}">
+    <div class="news-card cat-${item.category} ${isImportant ? 'is-important' : ''}">
       <div class="news-card-body">
 
         <!-- badge + তারিখ -->
@@ -2073,17 +2116,17 @@ function renderNewsList(items) {
           <span class="news-badge ${b.cls}">${b.label}</span>
           ${item.isNew ? '<span class="news-badge-new">🆕 নতুন</span>' : ''}
           ${isImportant ? '<span class="news-badge-imp">⚡ গুরুত্বপূর্ণ</span>' : ''}
-          <span class="news-date">📅 ${dateStr}</span>
+          <span class="news-date">📅 ${dateLabel}</span>
         </div>
 
-        <!-- headline — ক্লিক করলে বিস্তারিত টগল হবে -->
+        <!-- headline — ক্লিক করলে বিস্তারিত টগল হবে (লিংকে যায় না, সংক্ষেপে এখানেই দেখায়) -->
         <div class="news-headline" onclick="toggleNewsDetail('${detailId}','${btnId}')">
           ${item.title}
         </div>
 
-        <!-- বিস্তারিত — লুকানো থাকে -->
+        <!-- বিস্তারিত — লুকানো থাকে, ক্লিকে খোলে -->
         <div class="news-detail" id="${detailId}">
-          ${item.summary || 'বিস্তারিত তথ্য মূল ওয়েবসাইটে পাবেন।'}
+          ${detailHtml}
           <div style="margin-top:10px;font-size:12px;color:var(--muted)">
             📌 সূত্র: <b style="color:var(--text)">${item.source || ''}</b>
           </div>
@@ -2092,7 +2135,7 @@ function renderNewsList(items) {
         <!-- action বাটন -->
         <div class="news-card-actions">
           <button class="news-detail-btn" id="${btnId}" onclick="toggleNewsDetail('${detailId}','${btnId}')">
-            <span>📖</span> <span>বিস্তারিত দেখুন</span>
+            <span>📖</span> <span>সংক্ষেপে দেখুন</span>
           </button>
           <a class="news-source-link" href="${item.url}" target="_blank" rel="noopener">
             🔗 মূল সংবাদ পড়ুন ↗
@@ -2114,7 +2157,7 @@ function toggleNewsDetail(detailId, btnId) {
   if (btn) {
     btn.classList.toggle('active', !isOpen);
     const span = btn.querySelector('span:last-child');
-    if (span) span.textContent = isOpen ? 'বিস্তারিত দেখুন' : 'বিস্তারিত লুকান';
+    if (span) span.textContent = isOpen ? 'সংক্ষেপে দেখুন' : 'বিস্তারিত লুকান';
   }
 }
 
@@ -2143,7 +2186,12 @@ async function refreshNews() {
 
   if (btn) { btn.disabled = false; }
   if (icon) { icon.textContent = '🔄'; }
-  showToast('✅ সংবাদ আপডেট হয়েছে');
+
+  if (newsUsingFallback) {
+    showToast('⚠️ সরকারি সাইট থেকে সংযোগ করা যায়নি, নমুনা তথ্য দেখানো হচ্ছে', 'error');
+  } else {
+    showToast('✅ সংবাদ আপডেট হয়েছে');
+  }
 }
 
 // ────────────────────────────────────
