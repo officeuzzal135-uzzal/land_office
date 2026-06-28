@@ -2140,6 +2140,9 @@ function renderNewsList(items) {
           <a class="news-source-link" href="${item.url}" target="_blank" rel="noopener">
             🔗 মূল সংবাদ পড়ুন ↗
           </a>
+          ${item.fileUrl ? `<a class="news-source-link" href="${item.fileUrl}" target="_blank" rel="noopener">
+            📄 পিডিএফ দেখুন ↗
+          </a>` : ''}
         </div>
 
       </div>
